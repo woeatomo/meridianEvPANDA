@@ -21,6 +21,9 @@ import { getTrackedPositions, confirmPeak, updatePnlAndCheckExits, registerExitS
 import { recordPositionSnapshot } from "../pool-memory.js";
 import { getDeterministicCloseRule, computeBinsBelow } from "../exit-rules.js";
 import { startAdmin } from "./telegram-admin.js";
+import { startEngine, stopEngine, onWalletSignal, evaluateFastExit, closeEvilPandaPosition } from "../evilpanda/engine.js";
+
+const evilPandaOn = () => config.evilpanda?.enabled === true;
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -42,6 +45,13 @@ async function notify(text) {
 // ─── Signal pursuit ──────────────────────────────────────────────────────────
 
 function onSignal(signal) {
+  if (evilPandaOn()) {
+    // EvilPanda mode: convergence is only a candidate source. The mint still has to
+    // pass the EvilPanda screen and a 15m Supertrend break before any entry.
+    if (config.evilpanda.sources.smartWallet) onWalletSignal(signal);
+    finishSignal(store, signal, config.evilpanda.sources.smartWallet ? "routed to EvilPanda watchlist" : "smart-wallet source disabled", config.standalone);
+    return;
+  }
   signalQueue.push(signal);
   void drainSignals();
 }
@@ -55,7 +65,7 @@ async function drainSignals() {
       try {
         await pursueSignal(signal);
       } catch (e) {
-        finishSignal(store, signal, `error: ${e.message}`);
+        finishSignal(store, signal, `error: ${e.message}`, config.standalone);
         log("signal_error", `Signal ${signal.mint.slice(0, 8)} aborted: ${e.message}`);
       }
     }
@@ -78,7 +88,7 @@ async function pursueSignal(signal) {
     if (wait > 0) await sleep(wait);
   }
   if (!signal.done) {
-    finishSignal(store, signal, lastReason);
+    finishSignal(store, signal, lastReason, config.standalone);
     log("signal", `Signal ${signal.mint.slice(0, 8)} expired: ${lastReason}`);
   }
 }
@@ -90,11 +100,11 @@ async function attemptEntry(signal) {
   const attempt = store.data.attempts[mint];
   // One attempt chain per mint; bounded retries only for temporary failures.
   if (attempt && ["entered", "proposed", "submitting"].includes(attempt.status)) {
-    finishSignal(store, signal, `mint already attempted (${attempt.status})`);
+    finishSignal(store, signal, `mint already attempted (${attempt.status})`, config.standalone);
     return null;
   }
   if (attempt?.status === "failed" && (attempt.failures ?? 0) >= 2) {
-    finishSignal(store, signal, "deploy failed repeatedly");
+    finishSignal(store, signal, "deploy failed repeatedly", config.standalone);
     return null;
   }
 
@@ -102,7 +112,7 @@ async function attemptEntry(signal) {
   const positions = await getMyPositions({ force: true }).catch(() => null);
   if (!positions || positions.error || !Array.isArray(positions.positions)) return "position read unavailable";
   if (positions.positions.length >= config.risk.maxPositions) {
-    finishSignal(store, signal, "portfolio full");
+    finishSignal(store, signal, "portfolio full", config.standalone);
     return null;
   }
 
@@ -115,7 +125,7 @@ async function attemptEntry(signal) {
   }
   if (!screened.pass) {
     if (screened.terminal) {
-      finishSignal(store, signal, `blocked: ${screened.reason}`);
+      finishSignal(store, signal, `blocked: ${screened.reason}`, config.standalone);
       return null;
     }
     return screened.reason;
@@ -128,7 +138,7 @@ async function attemptEntry(signal) {
   if (balances.error || !Number.isFinite(balances.sol)) return "balance read unavailable";
   const amountY = computeDeployAmount(balances.sol);
   if (balances.sol < config.management.minSolToOpen + config.management.gasReserve) {
-    finishSignal(store, signal, "insufficient spendable SOL");
+    finishSignal(store, signal, "insufficient spendable SOL", config.standalone);
     return null;
   }
 
@@ -169,7 +179,7 @@ async function attemptEntry(signal) {
     record.txs = result.txs ?? [];
     record.amountSol = amountY;
     store.save();
-    finishSignal(store, signal, record.status === "proposed" ? "shadow proposal recorded" : "entered");
+    finishSignal(store, signal, record.status === "proposed" ? "shadow proposal recorded" : "entered", config.standalone);
     const label = result.dry_run ? "[SHADOW] Would deploy" : "Deployed";
     log("entry", `${label} ${amountY} SOL → pool ${pool.pool_address.slice(0, 8)} mint ${mint.slice(0, 8)} (${binsBelow} bins below, ${signal.events.length}-wallet convergence)`);
     void notify(`${result.dry_run ? "🕯️ Shadow proposal" : "✅ Entry"}: ${amountY} SOL → ${pool.pool_address.slice(0, 8)} (mint ${mint.slice(0, 8)}, ${signal.events.length} wallets)`);
@@ -228,6 +238,16 @@ export async function manageOnce() {
     if (live.positions.length === 0) return "No open positions";
     for (const p of live.positions) {
       recordPositionSnapshot(p.pool, p);
+      if (evilPandaOn()) {
+        confirmPeak(p.position, p.pnl_pct, 1);
+        const decision = await evaluateFastExit(p).catch(e => { log("manage_warn", `exit check failed: ${e.message}`); return null; });
+        if (decision) { await closeEvilPandaPosition(p, decision); continue; }
+        if ((p.unclaimed_fees_usd ?? 0) >= config.management.minClaimAmount) {
+          const res = await executeTool("claim_fees", { position_address: p.position }).catch(e => ({ error: e.message }));
+          log("manage", `${p.pair ?? p.position.slice(0, 8)}: claim fees ${res?.error ? `FAILED — ${res.error}` : "done"}`);
+        }
+        continue;
+      }
       // Slow backstop: raise peaks immediately and act on detected exits.
       // Real-time confirmation lives in the fast poller below.
       confirmPeak(p.position, p.pnl_pct, 1);
@@ -267,6 +287,15 @@ function startPnlPoller() {
       if (!live?.positions?.length) return;
       for (const p of live.positions) {
         confirmPeak(p.position, p.pnl_pct, confirmTicks);
+        if (evilPandaOn()) {
+          const decision = await evaluateFastExit(p).catch(() => null);
+          const { fire } = registerExitSignal(p.position, decision?.rule ?? null, confirmTicks);
+          if (!decision || !fire) continue;
+          log("poll", `Exit confirmed (${confirmTicks} ticks): ${p.pair ?? p.position.slice(0, 8)} — ${decision.reason}`);
+          manageBusy = true;
+          try { await closeEvilPandaPosition(p, decision); } finally { manageBusy = false; }
+          break; // one action per tick
+        }
         const exit = updatePnlAndCheckExits(p.position, p, config.management);
         const closeRule = exit ? null : getDeterministicCloseRule(p, config.management);
         let signal = null, reason = null;
@@ -323,6 +352,7 @@ async function shutdown(signalName) {
   shuttingDown = true;
   log("runtime", `${signalName} received — shutting down`);
   for (const timer of Object.values(timers)) clearInterval(timer);
+  try { stopEngine(); } catch { /* best-effort */ }
   try { stopAdmin?.(); } catch { /* best-effort */ }
   try { await monitor?.stop(); } catch { /* best-effort */ }
   // Best-effort stop notice; never let a slow Telegram call hold shutdown.
@@ -342,13 +372,16 @@ export async function startStandalone() {
     }
   }
 
-  monitor = new WalletMonitor(store, config.standalone, { onSignal });
+  const useMonitor = !evilPandaOn() || config.evilpanda.sources.smartWallet;
+  monitor = useMonitor ? new WalletMonitor(store, config.standalone, { onSignal }) : null;
   log("runtime", `Standalone starting — ${config.standalone.shadow ? "SHADOW MODE (proposals recorded, nothing submitted)" : "LIVE MODE"} | threshold=${config.standalone.walletThreshold} wallets / ${config.standalone.windowSec}s window | screening deadline=${config.standalone.screeningDeadlineSec}s`);
 
-  await monitor.start();
-  if (!monitor.healthy()) {
+  if (monitor) await monitor.start();
+  if (monitor && !monitor.healthy()) {
     log("runtime_warn", "Monitor baseline incomplete — wallets without a portfolio baseline produce no signals until reconciliation succeeds");
   }
+
+  if (evilPandaOn()) startEngine({ monitorStore: store, notifyFn: notify });
 
   // Entries come only from signals; exits run on their own cadences.
   timers.manage = setInterval(() => { void manageOnce(); }, Math.max(1, config.schedule.managementIntervalMin) * 60_000);

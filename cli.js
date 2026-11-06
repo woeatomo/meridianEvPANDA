@@ -14,6 +14,8 @@ Commands:
   pool --pool ADDRESS             Read focused pool metrics
   active-bin --pool ADDRESS       Read the current on-chain bin
   manage                          Run one deterministic management pass
+  ep-screen --mint ADDRESS        EvilPanda screen + 15m indicators for one mint (read-only)
+  ep-watchlist                    Show EvilPanda candidates and why they pass/fail
   close --position ADDRESS [--reason TEXT] [--skip-swap]
   claim --position ADDRESS
   swap --from MINT --to MINT --amount NUMBER
@@ -29,8 +31,8 @@ Commands:
 
 Flags: --dry-run forces all transaction operations to simulate only.
 Configuration: user-config.json (restart the daemon after editing).
-New entries are made only by wallet convergence; manual deploy and broad
-candidate scanning belong to the legacy branch.
+EvilPanda mode (default): entries come from the screener, the Discord relay and
+smart-wallet convergence, and only after a 15m close above Supertrend.
 `;
 const { values: flags, positionals } = parseArgs({
   allowPositionals: true,
@@ -64,6 +66,22 @@ async function main() {
     case 'pool': return out(await (await import('./standalone/screening.js')).poolDetail(requireFlag('pool')));
     case 'active-bin': return out(await (await import('./tools/dlmm.js')).getActiveBin({ pool_address: requireFlag('pool') }));
     case 'manage': return out(await (await import('./standalone/runtime.js')).manageOnce());
+    case 'ep-screen': {
+      const mint = requireFlag('mint');
+      const engine = await import('./evilpanda/engine.js');
+      const screened = await engine.screenCandidate(mint);
+      let chart = null;
+      try {
+        const src = await import('./evilpanda/sources.js');
+        const { snapshot, candlesSinceBreakUp } = await import('./evilpanda/indicators.js');
+        const c = config.evilpanda.chart;
+        const pool = c.source === 'dlmm_pool' && screened.pool ? screened.pool.pool_address : await src.chartPoolFor(mint, c.requestDelayMs);
+        const ks = await src.candles(pool, { aggregate: c.timeframeMin, limit: c.candles, currency: c.currency, delayMs: c.requestDelayMs });
+        chart = { chartPool: pool, candlesSinceBreakUp: candlesSinceBreakUp(ks, c), latest: snapshot(ks, c) };
+      } catch (e) { chart = { error: e.message }; }
+      return out({ pass: screened.pass, reason: screened.reason, pool: screened.pool?.pool_address ?? null, binStep: screened.pool?.dlmm_params?.bin_step ?? null, rugcheckScore: screened.rugcheck?.score_normalised ?? null, gmgn: screened.gmgn ?? null, chart });
+    }
+    case 'ep-watchlist': return out((await import('./evilpanda/engine.js')).watchlistSummary());
     case 'close': case 'claim': case 'swap': {
       const { executeTool } = await import('./tools/executor.js');
       if (cmd === 'close') return out(await executeTool('close_position', { position_address: requireFlag('position'), reason: flags.reason || 'manual close', skip_swap: !!flags['skip-swap'] }));
@@ -92,7 +110,13 @@ async function main() {
       if (!Number.isFinite(hours) || hours <= 0) throw new Error('--hours must be positive');
       return out({ summary: getPerformanceSummary(), recent: getPerformanceHistory({ hours }) });
     }
-    case 'config': return out({ shadowMode: config.standalone.shadow, risk: config.risk, screening: config.screening, management: config.management, strategy: config.strategy, schedule: config.schedule });
+    case 'config': {
+      const ep = JSON.parse(JSON.stringify(config.evilpanda));
+      ep.gmgn.apiKey = ep.gmgn.apiKey ? '(set)' : '(missing)';
+      ep.llm.apiKey = ep.llm.apiKey ? '(set)' : '(missing)';
+      delete ep.discord.apiKey;
+      return out({ shadowMode: config.standalone.shadow, risk: config.risk, screening: config.screening, management: config.management, strategy: config.strategy, schedule: config.schedule, evilPanda: ep });
+    }
     default: throw new Error(`Unknown command "${cmd}". Run meridian help. Legacy commands are archived on the legacy branch.`);
   }
 }

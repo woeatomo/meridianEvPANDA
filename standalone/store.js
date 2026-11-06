@@ -51,7 +51,7 @@ export function acceptEvents(store, events, options, now = Date.now()) {
   store.save();
   return triggered;
 }
-export function finishSignal(store, signal, reason, options, now = Date.now()) {
-  Object.assign(signal, { done: true, reason, closedAt: now, cooldownUntil: now + options.cooldownSec * 1000 });
+export function finishSignal(store, signal, reason, options = {}, now = Date.now()) {
+  Object.assign(signal, { done: true, reason, closedAt: now, cooldownUntil: now + (options.cooldownSec ?? 300) * 1000 });
   store.save();
 }

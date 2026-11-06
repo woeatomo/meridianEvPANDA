@@ -1,6 +1,6 @@
 # Meridian engineering guide
 
-The app is the standalone wallet-triggered bot. There is no legacy mode or LLM decision path. The previous implementation is preserved on the local `legacy` branch at `fd835b7` (and earlier commits).
+The app is the standalone bot with the EvilPanda strategy layer (`evilpanda/`). With `evilPanda.enabled` (default) entries come from the EvilPanda engine; with it off, the original wallet-convergence path runs. The only LLM use is the optional narrative veto in `evilpanda/llm.js`. The previous implementation is preserved on the local `legacy` branch at `fd835b7` (and earlier commits).
 
 ## Entry points and modules
 
@@ -26,15 +26,23 @@ The app is the standalone wallet-triggered bot. There is no legacy mode or LLM d
 
 ## Invariants
 
-- Entries require fresh wallet convergence. Do not reintroduce broad scans or expose a bypass through the CLI.
+- Entries require an EvilPanda candidate that passed screening AND a fresh 15m Supertrend break (or wallet convergence when EvilPanda is disabled). The CLI never deploys.
 - `shadowMode` forces `DRY_RUN=true` across transaction paths.
 - Missing data must not be interpreted as empty positions or spendable funds.
 - Keep entry screening independent of exit polling. Serialize wallet mutations through the existing queue.
 - Preserve `before_submit` and `on_prepared` hooks and persisted attempt recovery.
 - Read fresh positions and funds before deployment. Preserve position limits, duplicate guards, range floors, and bin-array initialization checks.
 - The `minBinsBelow` floor is 35. Only token-X / SOL-token-Y pools are supported for execution.
-- Never import the old agent, prompt, HiveMind, or server adapters into the active graph.
+- Never import the old agent, prompt or HiveMind into the active graph. The only Agent Meridian call allowed is the read-only Discord candidate relay in `evilpanda/sources.js`; nothing about the wallet or positions is sent.
+- Range shrinking (`shrink_to_initialized`) must only ever shorten a range to existing bin arrays; never pay bin-array rent.
 - Do not edit user secrets, runtime state, or the local archive branch as part of routine refactors.
+
+## EvilPanda modules
+
+- `evilpanda/indicators.js`, `range.js`, `filters.js`, `exits.js`: pure rule code, covered by `test/evilpanda.test.js`.
+- `evilpanda/sources.js`: read-only HTTP adapters (Jupiter, Rugcheck, GMGN, Meteora, GeckoTerminal, Discord relay).
+- `evilpanda/engine.js`: watchlist, candle schedule, entries and exits; state in `evilpanda-state.json`.
+- `evilpanda/llm.js`: optional narrative veto; failures fall back to the rules.
 
 ## Configuration and state
 

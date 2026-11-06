@@ -164,15 +164,124 @@ export const config = {
   jupiter: {
     // Internal Jupiter Ultra settings; override by env only, do not expose in user-config.
     apiKey: process.env.JUPITER_API_KEY ?? "",
-    referralAccount:
-      process.env.JUPITER_REFERRAL_ACCOUNT ??
-      "9MzhDUnq3KxecyPzvhguQMMPbooXQ3VAoCMPDnoijwey",
-    referralFeeBps: Number(
-      process.env.JUPITER_REFERRAL_FEE_BPS ?? 50,
-    ),
+    // Referral fee is OFF by default in this fork (upstream sent 0.5% of every
+    // swap to the original author's referral account). Set both env vars to re-enable.
+    referralAccount: process.env.JUPITER_REFERRAL_ACCOUNT ?? "",
+    referralFeeBps: Number(process.env.JUPITER_REFERRAL_FEE_BPS ?? 0),
   },
 
+  evilpanda: buildEvilPandaConfig(u.evilPanda ?? {}),
+
 };
+
+/**
+ * EvilPanda strategy settings (`evilPanda` block in user-config.json).
+ * Every key is optional; omitted keys use the defaults below. Secrets come
+ * from the environment: GMGN_API_KEY, LLM_API_KEY / OPENROUTER_API_KEY.
+ */
+export function buildEvilPandaConfig(e = {}) {
+  const pick = (obj, defaults) => ({ ...defaults, ...(obj && typeof obj === "object" ? obj : {}) });
+  const sources = pick(e.sources, { screener: true, discord: true, smartWallet: true });
+  const screener = pick(e.screener, {
+    intervalMin: 5,
+    minMcap: 250_000,
+    maxMcap: null,
+    minTokenVolume24h: 1_000_000,
+    minPoolVolume: 10_000,      // discovery prefilter, pool volume within `timeframe`
+    timeframe: "24h",
+    category: "trending",
+    pageSize: 50,
+    requireProfile: true,       // must have an image
+    requireSocials: false,
+    minTokenAgeHours: null,
+    maxTokenAgeHours: null,
+  });
+  const filters = pick(e.filters, { minTokenFeesSol: 30, maxTop10Pct: 30 });
+  const rugcheck = pick(e.rugcheck, {
+    enabled: true,
+    maxScore: 10,               // score_normalised (1 = best, 100 = worst)
+    rejectDanger: true,
+    blockRisks: ["Low amount of LP Providers", "Creator history of rugged tokens"],
+    requireData: true,
+    requestDelayMs: 1000,
+  });
+  const gmgn = pick(e.gmgn, {
+    enabled: true,
+    baseUrl: "https://openapi.gmgn.ai",
+    requestDelayMs: 2500,
+    maxRetries: 2,
+    ratesAreFractions: true,    // API rates 0.12 = 12%; compare with the GMGN UI once and flip if needed
+    maxPhishingPct: 30,         // GMGN UI "Phishing" = API rat_trader_amount_rate
+    maxBundlerPct: 60,
+    maxInsidersPct: 10,
+    maxTop10Pct: 30,
+    requireData: false,         // false: skip the GMGN filter when no key / data
+  });
+  gmgn.apiKey = nonEmptyString(process.env.GMGN_API_KEY, typeof e.gmgn?.apiKey === "string" ? e.gmgn.apiKey : "");
+  const discord = pick(e.discord, {
+    pollSec: 60,
+    url: "https://api.agentmeridian.xyz/api",
+    apiKey: "bWVyaWRpYW4taXMtdGhlLWJlc3QtYWdlbnRz", // upstream public read key
+  });
+  const chart = pick(e.chart, {
+    source: "top_pool",         // top_pool (most liquid pool, longest history) | dlmm_pool
+    timeframeMin: 15,
+    candles: 200,
+    currency: "token",          // price in SOL, same as the DLMM pool
+    requestDelayMs: 2200,       // GeckoTerminal free tier ≈ 30 calls/min
+    stPeriod: 10, stMultiplier: 3,
+    rsiPeriod: 2, rsiUpper: 90,
+    bbPeriod: 20, bbStdDev: 2,
+    macdFast: 12, macdSlow: 26, macdSignal: 9,
+    closeDelaySec: 20,          // wait after the candle boundary for data to settle
+  });
+  const entry = pick(e.entry, {
+    freshBreakCandles: 1,       // break above Supertrend must be within the last N closed candles
+    maxPriceMovePct: 5,         // abort if price moved more than this between signal and submit
+    watchlistTtlHours: 6,
+    rescreenMin: 30,
+    maxWatchlist: 40,
+  });
+  const range = pick(e.range, {
+    targetDownsidePct: 85,      // 0% to -85%
+    minDownsidePct: 50,         // shallower than this after shrinking → skip the pool
+    shrinkToInitialized: true,  // never pay non-refundable bin-array rent
+  });
+  const pool = pick(e.pool, { preferHighBinStep: true });
+  const shape = pick(e.shape, { default: "bid_ask", autoSpot: true });
+  shape.spot = pick(e.shape?.spot, {
+    minAgeHours: 72,
+    minMcap: 1_000_000,
+    maxVolatility: 3,
+    maxRugcheckScore: 1,
+    requireGmgn: true,
+    gmgnMarginPct: 50,          // each GMGN metric must be under half of its limit
+  });
+  shape.spot.limits = { maxPhishingPct: gmgn.maxPhishingPct, maxBundlerPct: gmgn.maxBundlerPct, maxInsidersPct: gmgn.maxInsidersPct };
+  const exits = pick(e.exits, {
+    stConfluence: true,
+    oorAboveWaitMinutes: 30,
+    oorBelowWaitMinutes: 60,
+    lowYieldMinFeePerTvl24h: 10,
+    lowYieldMinAgeMinutes: 60,
+    narrativeProxy: true,
+    minVolumeRatio: 0.5,        // last 6h volume vs previous 6h (1h candles)
+  });
+  const llm = pick(e.llm, {
+    enabled: false,
+    baseUrl: "https://openrouter.ai/api/v1",
+    model: "deepseek/deepseek-chat",
+    timeoutMs: 20_000,
+    onError: "allow",           // allow | block — what to do when the LLM is unreachable
+    useForEntry: true,
+    useForLowYield: true,
+  });
+  llm.apiKey = nonEmptyString(process.env.LLM_API_KEY, process.env.OPENROUTER_API_KEY, "");
+  return {
+    enabled: e.enabled !== false,
+    sources, screener, filters, rugcheck, gmgn, discord, chart, entry, range, pool, shape, exits, llm,
+  };
+}
 
 // Shadow applies to every existing transaction path, including CLI commands.
 if (config.standalone.shadow) process.env.DRY_RUN = "true";

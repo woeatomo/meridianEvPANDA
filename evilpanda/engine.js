@@ -1,0 +1,442 @@
+// EvilPanda orchestrator.
+//
+//   sources (screener / Discord relay / smart-wallet convergence)
+//      → watchlist → screening (Jupiter basics, Rugcheck, GMGN, pools)
+//      → wait for a 15m close that breaks ABOVE Supertrend
+//      → optional LLM narrative veto → shape → rent-free range → deploy
+//
+// Exits: fast rules every PnL poll (SL, TP, trailing, split OOR, low yield)
+// plus the Supertrend + RSI(2)/BB/MACD confluence exit on each 15m close.
+// Every wallet write goes through tools/executor.js (wallet lock, safety
+// checks, shadow mode). Missing data never counts as "safe".
+
+import fs from "node:fs";
+import { config, computeDeployAmount } from "../config.js";
+import { log } from "../logger.js";
+import { repoPath } from "../repo-root.js";
+import { getMyPositions } from "../tools/dlmm.js";
+import { executeTool } from "../tools/executor.js";
+import { getWalletBalances } from "../tools/wallet.js";
+import { getTrackedPosition } from "../state.js";
+import { isBlacklisted } from "../token-blacklist.js";
+import { isDevBlocked } from "../dev-blocklist.js";
+import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
+import { checkMintOnChain } from "../standalone/screening.js";
+import * as src from "./sources.js";
+import { snapshot, candlesSinceBreakUp, supertrend } from "./indicators.js";
+import { rejectTokenBasics, rejectRugcheck, gmgnMetrics, rejectGmgn, rejectPool, rankPools, chooseShape } from "./filters.js";
+import { fastExitDecision, candleExitDecision, updateOor, narrativeProxyHealthy } from "./exits.js";
+import { entryVeto, lowYieldVeto } from "./llm.js";
+
+const STATE_FILE = repoPath("evilpanda-state.json");
+const ep = () => config.evilpanda;
+
+// ─── Persistent state ───────────────────────────────────────────────────────
+
+function loadState() {
+  try {
+    const s = JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
+    return { watchlist: s.watchlist ?? {}, positions: s.positions ?? {}, lowYieldHolds: s.lowYieldHolds ?? {} };
+  } catch {
+    return { watchlist: {}, positions: {}, lowYieldHolds: {} };
+  }
+}
+let state = loadState();
+function saveState() {
+  try { fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2)); } catch (e) { log("ep_warn", `state save failed: ${e.message}`); }
+}
+
+let store = null;          // standalone MonitorStore (attempt records = duplicate/crash protection)
+let notify = async () => {};
+const timers = {};
+let candleBusy = false;
+let entryBusy = false;
+const closing = new Set();
+
+// ─── Watchlist ──────────────────────────────────────────────────────────────
+
+export function addCandidate(mint, source, meta = {}) {
+  if (!mint) return;
+  const now = Date.now();
+  const w = state.watchlist[mint];
+  if (w) {
+    if (!w.sources.includes(source)) w.sources.push(source);
+    w.expiresAt = Math.max(w.expiresAt, now + ep().entry.watchlistTtlHours * 3_600_000);
+    Object.assign(w.meta, meta);
+  } else {
+    if (Object.keys(state.watchlist).length >= ep().entry.maxWatchlist) {
+      // Drop the oldest non-passing entry to make room.
+      const victim = Object.values(state.watchlist).filter(x => !x.pass).sort((a, b) => a.addedAt - b.addedAt)[0];
+      if (!victim) return;
+      delete state.watchlist[victim.mint];
+    }
+    state.watchlist[mint] = { mint, sources: [source], meta, addedAt: now, expiresAt: now + ep().entry.watchlistTtlHours * 3_600_000, screenedAt: 0, pass: false, reason: "not screened" };
+    log("ep_watch", `+ ${mint.slice(0, 8)} via ${source}`);
+  }
+  saveState();
+}
+
+function pruneWatchlist(now = Date.now()) {
+  for (const [mint, w] of Object.entries(state.watchlist)) if (w.expiresAt < now) delete state.watchlist[mint];
+}
+
+// ─── Screening ──────────────────────────────────────────────────────────────
+
+/** Full EvilPanda screen for one mint. Returns { pass, reason, terminal?, token, pool, rugcheck, gmgn }. */
+export async function screenCandidate(mint) {
+  const e = ep();
+  if (isBlacklisted(mint) || isBaseMintOnCooldown(mint)) return { pass: false, terminal: true, reason: "blacklisted or on cooldown" };
+  const token = await src.jupiterToken(mint);
+  const basics = rejectTokenBasics(token, mint, { ...e.screener, ...e.filters });
+  if (basics) return { pass: false, reason: basics };
+  if (token.dev && isDevBlocked(token.dev)) return { pass: false, terminal: true, reason: "deployer blocked" };
+  await checkMintOnChain(mint);
+
+  let rugcheck = null;
+  if (e.rugcheck.enabled) {
+    rugcheck = await src.rugcheckSummary(mint, { delayMs: e.rugcheck.requestDelayMs });
+    const why = rejectRugcheck(rugcheck, e.rugcheck);
+    if (why) return { pass: false, reason: why };
+  }
+
+  let gmgn = null;
+  if (e.gmgn.enabled) {
+    gmgn = gmgnMetrics(await src.gmgnSecurity(mint, e.gmgn), e.gmgn);
+    const why = rejectGmgn(gmgn, e.gmgn);
+    if (why) return { pass: false, reason: why };
+  }
+
+  const addresses = (await src.poolsForMint(mint, config.tokens.SOL)).slice(0, 5);
+  const eligible = [];
+  const rejected = [];
+  for (const address of addresses) {
+    if (isPoolOnCooldown(address)) { rejected.push("pool cooldown"); continue; }
+    try {
+      const p = await src.discoveryPool(address, "24h");
+      const vol30 = await src.discoveryPool(address, "30m").catch(() => null);
+      if (vol30?.volatility != null) p.volatility = vol30.volatility;
+      const why = rejectPool(p, mint, config.tokens.SOL, config.screening);
+      if (why) rejected.push(why); else eligible.push(p);
+    } catch (err) { rejected.push(err.message); }
+  }
+  if (!eligible.length) return { pass: false, reason: rejected.slice(0, 2).join("; ") || "no eligible token/SOL DLMM pool" };
+  const pool = rankPools(eligible, e.pool.preferHighBinStep)[0];
+  return { pass: true, reason: "ok", token, pool, rugcheck, gmgn };
+}
+
+async function rescreenDue() {
+  const now = Date.now();
+  const due = Object.values(state.watchlist).filter(w => now - w.screenedAt > ep().entry.rescreenMin * 60_000);
+  for (const w of due) {
+    try {
+      const r = await screenCandidate(w.mint);
+      Object.assign(w, {
+        screenedAt: Date.now(), pass: r.pass, reason: r.reason,
+        poolAddress: r.pool?.pool_address ?? null, binStep: r.pool?.dlmm_params?.bin_step ?? null,
+        volatility: r.pool?.volatility ?? null, poolPrice: r.pool?.pool_price ?? null,
+        tokenFacts: r.token ? { symbol: r.token.symbol, name: r.token.name, mcap: r.token.mcap, createdAt: r.token.createdAt, holders: r.token.holderCount } : null,
+        rugcheckScore: r.rugcheck?.score_normalised ?? null, gmgn: r.gmgn ?? null,
+        shapeInput: r.pass ? { token: { createdAt: r.token.createdAt, mcap: r.token.mcap }, pool: { volatility: r.pool.volatility }, rugcheck: r.rugcheck ? { score_normalised: r.rugcheck.score_normalised } : null, gmgn: r.gmgn } : null,
+      });
+      if (r.terminal) delete state.watchlist[w.mint];
+      log("ep_screen", `${w.mint.slice(0, 8)} ${r.pass ? "PASS" : "fail"}: ${r.reason}`);
+    } catch (err) {
+      w.screenedAt = Date.now();
+      w.pass = false;
+      w.reason = `screen error: ${err.message}`;
+      log("ep_screen", `${w.mint.slice(0, 8)} error: ${err.message}`);
+    }
+    saveState();
+  }
+}
+
+// ─── Sources ────────────────────────────────────────────────────────────────
+
+async function runScreener() {
+  try {
+    const found = await src.scanDiscovery(ep().screener, config.tokens.SOL);
+    for (const c of found.slice(0, 15)) addCandidate(c.mint, "screener", { name: c.name });
+  } catch (e) { log("ep_warn", `screener scan failed: ${e.message}`); }
+}
+
+async function runDiscord() {
+  try {
+    const list = await src.discordCandidates(ep().discord);
+    for (const c of list) addCandidate(c.mint, "discord", { discordSources: c.sourceCount });
+  } catch (e) { log("ep_warn", `discord relay failed: ${e.message}`); }
+}
+
+/** Smart-wallet convergence signals land here instead of deploying directly. */
+export function onWalletSignal(signal) {
+  addCandidate(signal.mint, "smart_wallet", { wallets: signal.events?.length ?? 0 });
+}
+
+// ─── Candles ────────────────────────────────────────────────────────────────
+
+async function chartPool(mint, dlmmPool) {
+  const c = ep().chart;
+  return c.source === "dlmm_pool" && dlmmPool ? dlmmPool : src.chartPoolFor(mint, c.requestDelayMs);
+}
+
+async function candleSnapshot(mint, dlmmPool) {
+  const c = ep().chart;
+  const pool = await chartPool(mint, dlmmPool);
+  const ks = await src.candles(pool, { unit: "minute", aggregate: c.timeframeMin, limit: c.candles, currency: c.currency, delayMs: c.requestDelayMs });
+  return { candles: ks, snap: snapshot(ks, c), chartPool: pool };
+}
+
+// ─── Entry ──────────────────────────────────────────────────────────────────
+
+async function tryEntries() {
+  if (entryBusy) return;
+  entryBusy = true;
+  try {
+    const live = await getMyPositions({ force: true }).catch(() => null);
+    if (!live || live.error || !Array.isArray(live.positions)) { log("ep_entry", "position read unavailable — no entries this candle"); return; }
+    let open = live.positions.length;
+    const heldMints = new Set(live.positions.map(p => p.base_mint).filter(Boolean));
+    const candidates = Object.values(state.watchlist).filter(w => w.pass && !heldMints.has(w.mint));
+    for (const w of candidates) {
+      if (open >= config.risk.maxPositions) break;
+      const attempt = store?.data.attempts[w.mint];
+      if (attempt && ["entered", "proposed", "submitting"].includes(attempt.status)) continue;
+      if (attempt?.status === "failed" && (attempt.failures ?? 0) >= 2) continue;
+      let snap, ks;
+      try { ({ snap, candles: ks } = await candleSnapshot(w.mint, w.poolAddress)); }
+      catch (err) { log("ep_entry", `${w.mint.slice(0, 8)} candles unavailable: ${err.message}`); continue; }
+      const since = candlesSinceBreakUp(ks, ep().chart);
+      if (!snap || snap.stDirection !== "up" || since == null || since >= ep().entry.freshBreakCandles) continue;
+      log("ep_entry", `${w.mint.slice(0, 8)} broke above Supertrend (close ${snap.close} > ST ${snap.supertrend.toFixed(10)})`);
+      const entered = await attemptEntry(w, snap);
+      if (entered) open++;
+    }
+  } finally {
+    entryBusy = false;
+  }
+}
+
+async function attemptEntry(w, snap) {
+  const e = ep();
+  const veto = await entryVeto(e.llm, {
+    ...w.tokenFacts, narrative: await src.jupiterNarrative(w.mint), sources: w.sources,
+    rugcheck_score: w.rugcheckScore, gmgn: w.gmgn, discord_mentions: w.meta?.discordSources ?? 0,
+  });
+  if (!veto.allow) {
+    log("ep_entry", `${w.mint.slice(0, 8)} skipped by LLM: ${veto.reason}`);
+    w.pass = false; w.reason = `llm skip: ${veto.reason}`; w.screenedAt = Date.now();
+    saveState();
+    return false;
+  }
+
+  const balances = await getWalletBalances({ force: true, nativeOnly: true });
+  if (balances.error || !Number.isFinite(balances.sol)) { log("ep_entry", "balance read unavailable"); return false; }
+  if (balances.sol < config.management.minSolToOpen + config.management.gasReserve) { log("ep_entry", `insufficient SOL (${balances.sol})`); return false; }
+  const amountY = computeDeployAmount(balances.sol);
+  const shape = chooseShape(w.shapeInput ?? {}, e.shape);
+  // Fresh DLMM price at decision time; the submit guard compares against this.
+  let basePrice;
+  try { basePrice = Number((await src.discoveryPool(w.poolAddress, "5m")).pool_price); }
+  catch (err) { log("ep_entry", `${w.mint.slice(0, 8)} fresh pool read failed: ${err.message}`); return false; }
+
+  store.data.attempts[w.mint] = { at: Date.now(), mint: w.mint, pool: w.poolAddress, source: w.sources.join(","), status: "submitting", failures: store.data.attempts[w.mint]?.failures ?? 0, position: null, txs: [] };
+  store.save();
+
+  let submitted = 0;
+  const result = await executeTool("deploy_position", {
+    pool_address: w.poolAddress,
+    base_mint: w.mint,
+    amount_y: amountY,
+    strategy: shape.strategy,
+    downside_pct: e.range.targetDownsidePct,
+    upside_pct: 0,
+    shrink_to_initialized: e.range.shrinkToInitialized,
+    min_downside_pct: e.range.minDownsidePct,
+    volatility: w.volatility,
+    bin_step: w.binStep,
+    pool_name: w.tokenFacts?.symbol ? `${w.tokenFacts.symbol}-SOL` : undefined,
+    before_submit: async () => {
+      if (submitted++ > 0) return;
+      const fresh = await src.discoveryPool(w.poolAddress, "5m");
+      const now = Number(fresh.pool_price);
+      if (!(basePrice > 0) || !(now > 0)) throw new Error("price unavailable for move check");
+      const move = Math.abs(now - basePrice) / basePrice * 100;
+      if (move > e.entry.maxPriceMovePct) throw new Error(`price moved ${move.toFixed(1)}% since the entry decision`);
+    },
+    on_prepared: position => { store.data.attempts[w.mint].position = position; store.save(); },
+  }).catch(err => ({ error: err.message }));
+
+  const rec = store.data.attempts[w.mint];
+  const ok = result && result.success !== false && !result.error && !result.blocked;
+  if (!ok) {
+    rec.status = "failed";
+    rec.failures = (rec.failures ?? 0) + 1;
+    rec.error = result?.error || result?.reason || "unknown";
+    store.save();
+    log("ep_entry", `${w.mint.slice(0, 8)} deploy failed: ${rec.error}`);
+    return false;
+  }
+  rec.status = result.dry_run ? "proposed" : "entered";
+  rec.position = result.position ?? rec.position;
+  rec.amountSol = amountY;
+  store.save();
+  if (rec.position) {
+    state.positions[rec.position] = { mint: w.mint, pool: w.poolAddress, strategy: shape.strategy, enteredAt: Date.now(), oor: null };
+    saveState();
+  }
+  const range = result.would_deploy ? ` bins_below=${result.would_deploy.bins_below}${result.would_deploy.range_shrunk ? " (shrunk, rent-free)" : ""}` : "";
+  const label = result.dry_run ? "[SHADOW] would deploy" : "Deployed";
+  log("ep_entry", `${label} ${amountY} SOL ${shape.strategy} → ${w.poolAddress.slice(0, 8)} (${w.mint.slice(0, 8)}, via ${w.sources.join("+")})${range} — shape: ${shape.reason}; llm: ${veto.reason}`);
+  void notify(`${result.dry_run ? "🕯️ Shadow" : "✅ Entry"} ${w.tokenFacts?.symbol ?? w.mint.slice(0, 8)}: ${amountY} SOL ${shape.strategy}, -${e.range.targetDownsidePct}% target (${w.sources.join("+")})`);
+  return true;
+}
+
+// ─── Exits ──────────────────────────────────────────────────────────────────
+
+function epPosition(p) {
+  if (!state.positions[p.position]) state.positions[p.position] = { mint: p.base_mint ?? null, pool: p.pool, strategy: null, enteredAt: null, oor: null };
+  return state.positions[p.position];
+}
+
+/**
+ * Fast-rule evaluation for one live position (called by the PnL poller and the
+ * management cycle). Resolves low-yield checks. Returns {rule, reason} to close, or null.
+ */
+export async function evaluateFastExit(p) {
+  const rec = epPosition(p);
+  const nextOor = updateOor(rec.oor, p);
+  if (nextOor.dir !== rec.oor?.dir || nextOor.since !== rec.oor?.since) {
+    if (nextOor.dir) log("ep_exit", `${p.pair ?? p.position.slice(0, 8)} out of range ${nextOor.dir}`);
+    rec.oor = nextOor;
+    saveState();
+  }
+  const tracked = getTrackedPosition(p.position);
+  const decision = fastExitDecision(p, { peakPnlPct: tracked?.peak_pnl_pct ?? null, oor: rec.oor }, { management: config.management, exits: ep().exits });
+  if (!decision) return null;
+  if (decision.action === "CLOSE") return decision;
+  return resolveLowYield(p, rec, decision.reason);
+}
+
+async function resolveLowYield(p, rec, reason) {
+  const e = ep();
+  const hold = state.lowYieldHolds[p.position];
+  if (hold && Date.now() - hold.at < 30 * 60_000) return null; // re-check at most every 30 min
+  let healthy = false;
+  let why = "narrative proxy disabled";
+  const mint = rec.mint ?? p.base_mint;
+  if (e.exits.narrativeProxy && mint) {
+    try {
+      const pool = await chartPool(mint, p.pool);
+      const ks = await src.candles(pool, { unit: "hour", aggregate: 1, limit: 48, currency: e.chart.currency, delayMs: e.chart.requestDelayMs });
+      const st = supertrend(ks, e.chart.stPeriod, e.chart.stMultiplier);
+      const vols = ks.map(k => k.v);
+      const recentVolume = vols.slice(-6).reduce((a, b) => a + b, 0);
+      const priorVolume = vols.slice(-12, -6).reduce((a, b) => a + b, 0);
+      const m = { recentVolume, priorVolume, stDirection1h: st[st.length - 1]?.direction ?? null };
+      healthy = narrativeProxyHealthy(m, e.exits);
+      why = `vol ratio ${(priorVolume > 0 ? recentVolume / priorVolume : 0).toFixed(2)}, 1h trend ${m.stDirection1h}`;
+    } catch (err) { why = `proxy data unavailable (${err.message})`; }
+  }
+  if (!healthy) {
+    const llm = await lowYieldVeto(e.llm, { pair: p.pair, fee_per_tvl_24h: p.fee_per_tvl_24h, pnl_pct: p.pnl_pct, narrative: mint ? await src.jupiterNarrative(mint) : null, proxy: why });
+    if (llm?.hold) { healthy = true; why = `LLM: ${llm.reason}`; }
+  }
+  if (healthy) {
+    state.lowYieldHolds[p.position] = { at: Date.now(), why };
+    saveState();
+    log("ep_exit", `${p.pair ?? p.position.slice(0, 8)} ${reason} — holding, potential still alive (${why})`);
+    return null;
+  }
+  return { action: "CLOSE", rule: "LOW_YIELD", reason: `${reason}; ${why}` };
+}
+
+async function closePosition(p, decision) {
+  if (closing.has(p.position)) return;
+  closing.add(p.position);
+  try {
+    const res = await executeTool("close_position", { position_address: p.position, reason: decision.reason }).catch(err => ({ error: err.message }));
+    const ok = res?.success !== false && !res?.error && !res?.blocked;
+    log("ep_exit", `${p.pair ?? p.position.slice(0, 8)}: ${decision.rule} → ${ok ? (res?.dry_run ? "[SHADOW] would close" : "closed") : `close FAILED — ${res?.error || res?.reason}`} (${decision.reason})`);
+    if (ok) {
+      void notify(`${res?.dry_run ? "🕯️ Shadow close" : "🔚 Closed"} ${p.pair ?? p.position.slice(0, 8)}: ${decision.rule} — ${decision.reason}`);
+      if (!res?.dry_run) { delete state.positions[p.position]; delete state.lowYieldHolds[p.position]; saveState(); }
+    }
+  } finally {
+    closing.delete(p.position);
+  }
+}
+
+async function candleExits() {
+  const live = await getMyPositions({ force: true }).catch(() => null);
+  if (!live || live.error || !Array.isArray(live.positions)) return;
+  // Forget positions that closed elsewhere (manual close, other tools).
+  const open = new Set(live.positions.map(p => p.position));
+  for (const [addr, rec] of Object.entries(state.positions)) {
+    if (!open.has(addr) && Date.now() - (rec.enteredAt ?? 0) > 3_600_000) { delete state.positions[addr]; delete state.lowYieldHolds[addr]; }
+  }
+  saveState();
+  for (const p of live.positions) {
+    const rec = epPosition(p);
+    const mint = rec.mint ?? p.base_mint;
+    if (!mint) continue;
+    try {
+      const { snap } = await candleSnapshot(mint, p.pool);
+      const d = candleExitDecision(snap, { exits: ep().exits });
+      if (snap) log("ep_exit", `${p.pair ?? p.position.slice(0, 8)} 15m: ST ${snap.stDirection}, RSI2 ${snap.rsi.toFixed(0)}, >BB ${snap.aboveBbUpper}, MACD1st ${snap.macdFirstGreen}`);
+      if (d) await closePosition(p, d);
+    } catch (err) { log("ep_exit", `${p.pair ?? p.position.slice(0, 8)} candle exit check failed: ${err.message}`); }
+  }
+}
+
+// ─── Scheduling ─────────────────────────────────────────────────────────────
+
+async function onCandleClose() {
+  if (candleBusy) return;
+  candleBusy = true;
+  try {
+    pruneWatchlist();
+    await candleExits();       // exits first
+    await rescreenDue();
+    await tryEntries();
+  } catch (e) {
+    log("ep_warn", `candle cycle failed: ${e.message}`);
+  } finally {
+    candleBusy = false;
+  }
+}
+
+function scheduleCandles() {
+  const c = ep().chart;
+  const period = c.timeframeMin * 60_000;
+  const next = Math.ceil(Date.now() / period) * period + c.closeDelaySec * 1000;
+  timers.candle = setTimeout(async () => {
+    await onCandleClose();
+    scheduleCandles();
+  }, Math.max(1000, next - Date.now()));
+}
+
+export function startEngine({ monitorStore, notifyFn }) {
+  store = monitorStore;
+  if (notifyFn) notify = notifyFn;
+  const e = ep();
+  if (e.sources.screener) {
+    void runScreener();
+    timers.screener = setInterval(() => void runScreener(), Math.max(1, e.screener.intervalMin) * 60_000);
+  }
+  if (e.sources.discord) {
+    void runDiscord();
+    timers.discord = setInterval(() => void runDiscord(), Math.max(15, e.discord.pollSec) * 1000);
+  }
+  scheduleCandles();
+  void rescreenDue();
+  log("ep", `EvilPanda engine started — sources: ${Object.entries(e.sources).filter(([, v]) => v).map(([k]) => k).join(", ")} | range -${e.range.targetDownsidePct}% (min -${e.range.minDownsidePct}%, rent-free=${e.range.shrinkToInitialized}) | shape ${e.shape.default}${e.shape.autoSpot ? "/auto-spot" : ""} | LLM ${e.llm.enabled ? e.llm.model : "off"} | GMGN ${e.gmgn.apiKey ? "on" : "no key → skipped"}`);
+}
+
+export function stopEngine() {
+  for (const t of Object.values(timers)) { clearInterval(t); clearTimeout(t); }
+}
+
+export function watchlistSummary() {
+  return Object.values(state.watchlist).map(w => ({ mint: w.mint, sources: w.sources, pass: w.pass, reason: w.reason }));
+}
+
+export { closePosition as closeEvilPandaPosition };

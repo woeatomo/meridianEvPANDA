@@ -153,6 +153,46 @@ async function assertRangeDoesNotRequireBinArrayInitialization(pool, minBinId, m
   }
 }
 
+/**
+ * Which bin arrays covering [minBinId, maxBinId] already exist on-chain.
+ * Arrays that would also need a missing bitmap extension count as missing,
+ * so a range built only from "initialized" arrays never pays pool rent.
+ * Returns (index:number) => boolean.
+ */
+async function initializedBinArrayLookup(pool, minBinId, maxBinId) {
+  const {
+    getBinArrayKeysCoverage,
+    getBinArrayIndexesCoverage,
+    deriveBinArrayBitmapExtension,
+    isOverflowDefaultBinArrayBitmap,
+  } = await getDLMM();
+  if (!getBinArrayKeysCoverage || !getBinArrayIndexesCoverage) {
+    throw new Error("Cannot read Meteora bin-array coverage; refusing deploy.");
+  }
+  const programId = getDlmmProgramId();
+  const poolPubkey = new PublicKey(pool.pubkey?.toString?.() || pool.lbPair?.publicKey?.toString?.() || pool.lbPair?.pubkey?.toString?.());
+  const lower = new BN(Math.min(minBinId, maxBinId));
+  const upper = new BN(Math.max(minBinId, maxBinId));
+  const indexes = getBinArrayIndexesCoverage(lower, upper);
+  const keys = getBinArrayKeysCoverage(lower, upper, poolPubkey, programId);
+  const accounts = await getConnection().getMultipleAccountsInfo(keys, "confirmed");
+  let extensionExists = null;
+  const ok = new Set();
+  for (let i = 0; i < indexes.length; i++) {
+    if (!accounts[i]) continue;
+    const index = Number(indexes[i].toString());
+    if (deriveBinArrayBitmapExtension && isOverflowDefaultBinArrayBitmap && isOverflowDefaultBinArrayBitmap(indexes[i])) {
+      if (extensionExists == null) {
+        const [ext] = deriveBinArrayBitmapExtension(poolPubkey, programId);
+        extensionExists = !!(await getConnection().getAccountInfo(ext, "confirmed"));
+      }
+      if (!extensionExists) continue;
+    }
+    ok.add(index);
+  }
+  return (index) => ok.has(index);
+}
+
 // ─── Pool Cache ────────────────────────────────────────────────
 const poolCache = new Map();
 const poolMetadataCache = new Map();
@@ -241,6 +281,10 @@ export async function deployPosition({
   entry_holders,
   before_submit,
   on_prepared,
+  // EvilPanda: shorten the range to already-initialized bin arrays instead of
+  // refusing the deploy, and refuse only if the result is shallower than min_downside_pct.
+  shrink_to_initialized = false,
+  min_downside_pct = null,
 }) {
   pool_address = normalizeMint(pool_address);
   if (typeof before_submit !== "function") throw new Error("Deploy requires a wallet-signal recheck (before_submit)");
@@ -339,6 +383,24 @@ export async function deployPosition({
   if (!Number.isInteger(activeBinsBelow) || !Number.isInteger(activeBinsAbove)) {
     throw new Error("Invalid bin range: bins_below and bins_above must be whole-bin integers.");
   }
+  let rangeShrunk = false;
+  if (shrink_to_initialized) {
+    const { shrinkToInitialized, downsidePctForBins } = await import("../evilpanda/range.js");
+    const targetMin = activeBin.binId - activeBinsBelow;
+    const lookup = await initializedBinArrayLookup(pool, targetMin, activeBin.binId);
+    const shrunk = shrinkToInitialized(activeBin.binId, targetMin, lookup);
+    if (!shrunk) throw new Error("Deploy skipped: the active bin's own bin array is not initialized (would cost non-refundable rent).");
+    if (shrunk.shrunk) {
+      log("deploy", `Range shortened to avoid bin-array rent: ${activeBinsBelow} → ${shrunk.binsBelow} bins below active`);
+      activeBinsBelow = shrunk.binsBelow;
+      rangeShrunk = true;
+    }
+    const coveredPct = downsidePctForBins(activeBinsBelow, actualBinStep);
+    if (min_downside_pct != null && coveredPct < Number(min_downside_pct)) {
+      throw new Error(`Deploy skipped: rent-free range only covers -${coveredPct.toFixed(1)}% (< -${min_downside_pct}% minimum).`);
+    }
+  }
+
   const minBinsBelow = Math.max(MIN_SAFE_BINS_BELOW, Number(config.strategy.minBinsBelow ?? MIN_SAFE_BINS_BELOW));
   const totalBins = activeBinsBelow + activeBinsAbove;
   if (totalBins < minBinsBelow) {
@@ -360,6 +422,8 @@ export async function deployPosition({
         amount_x: finalAmountX,
         amount_y: finalAmountY,
         wide_range: totalBins > 69,
+        range_shrunk: rangeShrunk,
+        bin_step: actualBinStep,
       },
       message: "DRY RUN — no transaction sent",
     };
