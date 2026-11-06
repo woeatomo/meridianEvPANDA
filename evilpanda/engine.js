@@ -24,7 +24,7 @@ import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { checkMintOnChain } from "../standalone/screening.js";
 import * as src from "./sources.js";
 import { snapshot, candlesSinceBreakUp, supertrend } from "./indicators.js";
-import { rejectTokenBasics, rejectRugcheck, gmgnMetrics, rejectGmgn, rejectPool, rankPools, chooseShape } from "./filters.js";
+import { rejectTokenBasics, rejectRugcheck, rejectGmgnFetch, rejectPool, rankPools, chooseShape } from "./filters.js";
 import { fastExitDecision, candleExitDecision, updateOor, narrativeProxyHealthy } from "./exits.js";
 import { entryVeto, lowYieldVeto } from "./llm.js";
 
@@ -51,6 +51,7 @@ let notify = async () => {};
 const timers = {};
 let candleBusy = false;
 let entryBusy = false;
+let rescreenBusy = false;
 const closing = new Set();
 
 // ─── Watchlist ──────────────────────────────────────────────────────────────
@@ -101,9 +102,9 @@ export async function screenCandidate(mint) {
 
   let gmgn = null;
   if (e.gmgn.enabled) {
-    gmgn = gmgnMetrics(await src.gmgnSecurity(mint, e.gmgn), e.gmgn);
-    const why = rejectGmgn(gmgn, e.gmgn);
-    if (why) return { pass: false, reason: why };
+    const r = rejectGmgnFetch(await src.gmgnSecurity(mint, e.gmgn), e.gmgn);
+    gmgn = r.metrics;
+    if (r.reason) return { pass: false, reason: r.reason };
   }
 
   const addresses = (await src.poolsForMint(mint, config.tokens.SOL)).slice(0, 5);
@@ -178,11 +179,29 @@ async function chartPool(mint, dlmmPool) {
   return c.source === "dlmm_pool" && dlmmPool ? dlmmPool : src.chartPoolFor(mint, c.requestDelayMs);
 }
 
-async function candleSnapshot(mint, dlmmPool) {
+/** Start time of the candle that most recently closed. */
+function lastClosedCandleStart(now = Date.now()) {
+  const period = ep().chart.timeframeMin * 60_000;
+  return Math.floor(now / period) * period - period;
+}
+
+/**
+ * Candles + indicator snapshot. With `requireLatest`, the newest candle must be
+ * the one that just closed; GeckoTerminal can publish late, so retry briefly
+ * and report `stale: true` instead of evaluating an older candle.
+ */
+async function candleSnapshot(mint, dlmmPool, { requireLatest = false } = {}) {
   const c = ep().chart;
   const pool = await chartPool(mint, dlmmPool);
-  const ks = await src.candles(pool, { unit: "minute", aggregate: c.timeframeMin, limit: c.candles, currency: c.currency, delayMs: c.requestDelayMs });
-  return { candles: ks, snap: snapshot(ks, c), chartPool: pool };
+  const expected = lastClosedCandleStart();
+  let ks = [];
+  for (let attempt = 0; attempt < (requireLatest ? 3 : 1); attempt++) {
+    if (attempt > 0) await new Promise(r => setTimeout(r, 20_000));
+    ks = await src.candles(pool, { mint, unit: "minute", aggregate: c.timeframeMin, limit: c.candles, currency: c.currency, delayMs: c.requestDelayMs });
+    if (!requireLatest || ks.at(-1)?.t >= expected) break;
+  }
+  const stale = requireLatest && !(ks.at(-1)?.t >= expected);
+  return { candles: ks, snap: stale ? null : snapshot(ks, c), chartPool: pool, stale };
 }
 
 // ─── Entry ──────────────────────────────────────────────────────────────────
@@ -201,14 +220,21 @@ async function tryEntries() {
       const attempt = store?.data.attempts[w.mint];
       if (attempt && ["entered", "proposed", "submitting"].includes(attempt.status)) continue;
       if (attempt?.status === "failed" && (attempt.failures ?? 0) >= 2) continue;
-      let snap, ks;
-      try { ({ snap, candles: ks } = await candleSnapshot(w.mint, w.poolAddress)); }
+      // Entries must happen close to the candle close; a slow cycle skips rather than chases.
+      const lateMin = (Date.now() - (lastClosedCandleStart() + ep().chart.timeframeMin * 60_000)) / 60_000;
+      if (lateMin > ep().entry.maxEntryDelayMin) { log("ep_entry", `entry window passed (${lateMin.toFixed(1)}m after close) — remaining candidates wait for the next candle`); break; }
+      let snap, ks, stale;
+      try { ({ snap, candles: ks, stale } = await candleSnapshot(w.mint, w.poolAddress, { requireLatest: true })); }
       catch (err) { log("ep_entry", `${w.mint.slice(0, 8)} candles unavailable: ${err.message}`); continue; }
+      if (stale) { log("ep_entry", `${w.mint.slice(0, 8)} latest 15m candle not published yet — skipped`); continue; }
       const since = candlesSinceBreakUp(ks, ep().chart);
       if (!snap || snap.stDirection !== "up" || since == null || since >= ep().entry.freshBreakCandles) continue;
       log("ep_entry", `${w.mint.slice(0, 8)} broke above Supertrend (close ${snap.close} > ST ${snap.supertrend.toFixed(10)})`);
-      const entered = await attemptEntry(w, snap);
-      if (entered) open++;
+      try {
+        if (await attemptEntry(w, snap)) open++;
+      } catch (err) {
+        log("ep_entry", `${w.mint.slice(0, 8)} entry error: ${err.message}`);
+      }
     }
   } finally {
     entryBusy = false;
@@ -301,7 +327,7 @@ function epPosition(p) {
  * Fast-rule evaluation for one live position (called by the PnL poller and the
  * management cycle). Resolves low-yield checks. Returns {rule, reason} to close, or null.
  */
-export async function evaluateFastExit(p) {
+export async function evaluateFastExit(p, { resolveSlow = true } = {}) {
   const rec = epPosition(p);
   const nextOor = updateOor(rec.oor, p);
   if (nextOor.dir !== rec.oor?.dir || nextOor.since !== rec.oor?.since) {
@@ -313,6 +339,9 @@ export async function evaluateFastExit(p) {
   const decision = fastExitDecision(p, { peakPnlPct: tracked?.peak_pnl_pct ?? null, oor: rec.oor }, { management: config.management, exits: ep().exits });
   if (!decision) return null;
   if (decision.action === "CLOSE") return decision;
+  // Low yield needs network (candles, maybe LLM). The 3s poller never waits on it,
+  // so stop-losses on other positions are not delayed; the management cycle resolves it.
+  if (!resolveSlow) return null;
   return resolveLowYield(p, rec, decision.reason);
 }
 
@@ -326,7 +355,7 @@ async function resolveLowYield(p, rec, reason) {
   if (e.exits.narrativeProxy && mint) {
     try {
       const pool = await chartPool(mint, p.pool);
-      const ks = await src.candles(pool, { unit: "hour", aggregate: 1, limit: 48, currency: e.chart.currency, delayMs: e.chart.requestDelayMs });
+      const ks = await src.candles(pool, { mint, unit: "hour", aggregate: 1, limit: 48, currency: e.chart.currency, delayMs: e.chart.requestDelayMs });
       const st = supertrend(ks, e.chart.stPeriod, e.chart.stMultiplier);
       const vols = ks.map(k => k.v);
       const recentVolume = vols.slice(-6).reduce((a, b) => a + b, 0);
@@ -349,14 +378,22 @@ async function resolveLowYield(p, rec, reason) {
   return { action: "CLOSE", rule: "LOW_YIELD", reason: `${reason}; ${why}` };
 }
 
+const recentlyClosed = new Map(); // position → { at, dryRun }
+
 async function closePosition(p, decision) {
   if (closing.has(p.position)) return;
+  // Poller, management cycle and candle job read positions independently; a list
+  // read before a close finished must not trigger a second close (or, in shadow
+  // mode, an alert every 3s).
+  const last = recentlyClosed.get(p.position);
+  if (last && Date.now() - last.at < (last.dryRun ? 30 : 10) * 60_000) return;
   closing.add(p.position);
   try {
     const res = await executeTool("close_position", { position_address: p.position, reason: decision.reason }).catch(err => ({ error: err.message }));
     const ok = res?.success !== false && !res?.error && !res?.blocked;
     log("ep_exit", `${p.pair ?? p.position.slice(0, 8)}: ${decision.rule} → ${ok ? (res?.dry_run ? "[SHADOW] would close" : "closed") : `close FAILED — ${res?.error || res?.reason}`} (${decision.reason})`);
     if (ok) {
+      recentlyClosed.set(p.position, { at: Date.now(), dryRun: !!res?.dry_run });
       void notify(`${res?.dry_run ? "🕯️ Shadow close" : "🔚 Closed"} ${p.pair ?? p.position.slice(0, 8)}: ${decision.rule} — ${decision.reason}`);
       if (!res?.dry_run) { delete state.positions[p.position]; delete state.lowYieldHolds[p.position]; saveState(); }
     }
@@ -379,7 +416,8 @@ async function candleExits() {
     const mint = rec.mint ?? p.base_mint;
     if (!mint) continue;
     try {
-      const { snap } = await candleSnapshot(mint, p.pool);
+      const { snap, stale } = await candleSnapshot(mint, p.pool, { requireLatest: true });
+      if (stale) { log("ep_exit", `${p.pair ?? p.position.slice(0, 8)} latest 15m candle not published — confluence check skipped this candle`); continue; }
       const d = candleExitDecision(snap, { exits: ep().exits });
       if (snap) log("ep_exit", `${p.pair ?? p.position.slice(0, 8)} 15m: ST ${snap.stDirection}, RSI2 ${snap.rsi.toFixed(0)}, >BB ${snap.aboveBbUpper}, MACD1st ${snap.macdFirstGreen}`);
       if (d) await closePosition(p, d);
@@ -394,8 +432,7 @@ async function onCandleClose() {
   candleBusy = true;
   try {
     pruneWatchlist();
-    await candleExits();       // exits first
-    await rescreenDue();
+    await candleExits();       // exits first, then entries; rescreening runs on its own timer
     await tryEntries();
   } catch (e) {
     log("ep_warn", `candle cycle failed: ${e.message}`);
@@ -427,7 +464,13 @@ export function startEngine({ monitorStore, notifyFn }) {
     timers.discord = setInterval(() => void runDiscord(), Math.max(15, e.discord.pollSec) * 1000);
   }
   scheduleCandles();
-  void rescreenDue();
+  const rescreen = async () => {
+    if (rescreenBusy) return;
+    rescreenBusy = true;
+    try { await rescreenDue(); } catch (err) { log("ep_warn", `rescreen failed: ${err.message}`); } finally { rescreenBusy = false; }
+  };
+  void rescreen();
+  timers.rescreen = setInterval(() => void rescreen(), 2 * 60_000);
   log("ep", `EvilPanda engine started — sources: ${Object.entries(e.sources).filter(([, v]) => v).map(([k]) => k).join(", ")} | range -${e.range.targetDownsidePct}% (min -${e.range.minDownsidePct}%, rent-free=${e.range.shrinkToInitialized}) | shape ${e.shape.default}${e.shape.autoSpot ? "/auto-spot" : ""} | LLM ${e.llm.enabled ? e.llm.model : "off"} | GMGN ${e.gmgn.apiKey ? "on" : "no key → skipped"}`);
 }
 

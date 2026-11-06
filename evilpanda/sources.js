@@ -56,7 +56,11 @@ export async function rugcheckSummary(mint, { delayMs = 1000 } = {}) {
   }
 }
 
-/** GMGN token security (rates for phishing/bundler/insiders/top10) or null without key / on error. */
+/**
+ * GMGN token security (rates for phishing/bundler/insiders/top10).
+ * Returns { ok: true, data } on success, { ok: false, reason } when the call
+ * failed, or null when no API key is configured (filter intentionally skipped).
+ */
 export async function gmgnSecurity(mint, g) {
   if (!g.apiKey) return null;
   const url = new URL(`${String(g.baseUrl).replace(/\/+$/, "")}/v1/token/security`);
@@ -64,19 +68,21 @@ export async function gmgnSecurity(mint, g) {
   url.searchParams.set("address", mint);
   url.searchParams.set("timestamp", String(Math.floor(Date.now() / 1000)));
   url.searchParams.set("client_id", randomUUID());
+  let reason = "unknown error";
   for (let attempt = 0; attempt <= (g.maxRetries ?? 2); attempt++) {
     await pace("gmgn", g.requestDelayMs ?? 2500);
     try {
       const res = await fetch(url, { headers: { "X-APIKEY": g.apiKey }, signal: AbortSignal.timeout(12_000) });
-      if (res.status === 429) { await sleep(Math.min(30_000, 3000 * 2 ** attempt)); continue; }
-      if (!res.ok) return null;
+      if (res.status === 429) { reason = "rate limited"; await sleep(Math.min(30_000, 3000 * 2 ** attempt)); continue; }
+      if (!res.ok) return { ok: false, reason: `HTTP ${res.status}` };
       const payload = await res.json();
-      return payload?.data?.data || payload?.data || null;
-    } catch {
-      return null;
+      const data = payload?.data?.data || payload?.data || null;
+      return data && typeof data === "object" ? { ok: true, data } : { ok: false, reason: "empty response" };
+    } catch (e) {
+      reason = e?.name === "TimeoutError" ? "timeout" : e?.message || "network error";
     }
   }
-  return null;
+  return { ok: false, reason };
 }
 
 // ─── Pools ───────────────────────────────────────────────────────────────────
@@ -154,9 +160,11 @@ export async function chartPoolFor(mint, delayMs) {
  * Closed OHLCV candles, oldest → newest. The still-forming candle is dropped.
  * @param {"minute"|"hour"} unit
  */
-export async function candles(pool, { unit = "minute", aggregate = 15, limit = 200, currency = "token", delayMs = 2200 } = {}) {
+export async function candles(pool, { mint = null, unit = "minute", aggregate = 15, limit = 200, currency = "token", delayMs = 2200 } = {}) {
   await pace("gecko", delayMs);
-  const params = new URLSearchParams({ aggregate: String(aggregate), limit: String(limit), currency, token: "base" });
+  // token=<mint> returns the mint's own price even when it is the quote side of
+  // the chart pool; token="base" would invert the chart in that case.
+  const params = new URLSearchParams({ aggregate: String(aggregate), limit: String(limit), currency, token: mint || "base" });
   const data = await getJson(`${GECKO}/pools/${pool}/ohlcv/${unit}?${params}`);
   const list = data?.data?.attributes?.ohlcv_list;
   if (!Array.isArray(list)) throw new Error("ohlcv unavailable");

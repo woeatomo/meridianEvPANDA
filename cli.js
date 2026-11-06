@@ -76,7 +76,7 @@ async function main() {
         const { snapshot, candlesSinceBreakUp } = await import('./evilpanda/indicators.js');
         const c = config.evilpanda.chart;
         const pool = c.source === 'dlmm_pool' && screened.pool ? screened.pool.pool_address : await src.chartPoolFor(mint, c.requestDelayMs);
-        const ks = await src.candles(pool, { aggregate: c.timeframeMin, limit: c.candles, currency: c.currency, delayMs: c.requestDelayMs });
+        const ks = await src.candles(pool, { mint, aggregate: c.timeframeMin, limit: c.candles, currency: c.currency, delayMs: c.requestDelayMs });
         chart = { chartPool: pool, candlesSinceBreakUp: candlesSinceBreakUp(ks, c), latest: snapshot(ks, c) };
       } catch (e) { chart = { error: e.message }; }
       return out({ pass: screened.pass, reason: screened.reason, pool: screened.pool?.pool_address ?? null, binStep: screened.pool?.dlmm_params?.bin_step ?? null, rugcheckScore: screened.rugcheck?.score_normalised ?? null, gmgn: screened.gmgn ?? null, chart });

@@ -4,7 +4,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { rsi, macd, bollinger, supertrend, snapshot, candlesSinceBreakUp } from "../evilpanda/indicators.js";
 import { binsForDownsidePct, downsidePctForBins, shrinkToInitialized, binArrayIndex } from "../evilpanda/range.js";
-import { rejectTokenBasics, rejectRugcheck, gmgnMetrics, rejectGmgn, rejectPool, rankPools, chooseShape } from "../evilpanda/filters.js";
+import { rejectTokenBasics, rejectRugcheck, gmgnMetrics, rejectGmgn, rejectGmgnFetch, rejectPool, rankPools, chooseShape } from "../evilpanda/filters.js";
 import { oorDirection, updateOor, fastExitDecision, candleExitDecision, narrativeProxyHealthy } from "../evilpanda/exits.js";
 import { _test as llmTest, entryVeto } from "../evilpanda/llm.js";
 import { buildEvilPandaConfig } from "../config.js";
@@ -133,6 +133,16 @@ test("GMGN filter: phishing<30, bundling<60, insiders<10, top10<30; skipped with
   assert.match(rejectGmgn({ ...m, insidersPct: 10 }, ep.gmgn), /insiders/);
   assert.equal(rejectGmgn(null, ep.gmgn), null);
   assert.match(rejectGmgn(null, { ...ep.gmgn, requireData: true }), /unavailable/);
+});
+
+test("GMGN fetch gate: no key skips, an outage or missing field with a key rejects", () => {
+  assert.equal(rejectGmgnFetch(null, ep.gmgn).reason, null);
+  assert.match(rejectGmgnFetch(null, { ...ep.gmgn, requireData: true }).reason, /no API key/);
+  assert.match(rejectGmgnFetch({ ok: false, reason: "timeout" }, ep.gmgn).reason, /unavailable \(timeout\)/);
+  const full = { rat_trader_amount_rate: 0.1, bundler_trader_amount_rate: 0.2, suspected_insider_hold_rate: 0.01, top_10_holder_rate: 0.2 };
+  assert.equal(rejectGmgnFetch({ ok: true, data: full }, ep.gmgn).reason, null);
+  const { rat_trader_amount_rate, ...missing } = full;
+  assert.match(rejectGmgnFetch({ ok: true, data: missing }, ep.gmgn).reason, /phishing unknown/);
 });
 
 test("pools: exact token/SOL DLMM within bin-step range, highest bin step ranked first", () => {

@@ -288,7 +288,7 @@ function startPnlPoller() {
       for (const p of live.positions) {
         confirmPeak(p.position, p.pnl_pct, confirmTicks);
         if (evilPandaOn()) {
-          const decision = await evaluateFastExit(p).catch(() => null);
+          const decision = await evaluateFastExit(p, { resolveSlow: false }).catch(() => null);
           const { fire } = registerExitSignal(p.position, decision?.rule ?? null, confirmTicks);
           if (!decision || !fire) continue;
           log("poll", `Exit confirmed (${confirmTicks} ticks): ${p.pair ?? p.position.slice(0, 8)} — ${decision.reason}`);

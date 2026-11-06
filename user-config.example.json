@@ -101,6 +101,7 @@
     "entry": {
       "freshBreakCandles": 1,
       "maxPriceMovePct": 5,
+      "maxEntryDelayMin": 5,
       "watchlistTtlHours": 6,
       "rescreenMin": 30
     },

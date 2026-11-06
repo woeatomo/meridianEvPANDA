@@ -61,6 +61,18 @@ export function gmgnMetrics(security, g) {
   };
 }
 
+/**
+ * GMGN gate on a gmgnSecurity() result. null = no API key (skipped unless
+ * requireData); {ok:false} = the call failed → reject, an outage is never "safe".
+ * With data, every configured metric must be present.
+ */
+export function rejectGmgnFetch(fetchResult, g) {
+  if (fetchResult == null) return { reason: g.requireData ? "gmgn: no API key" : null, metrics: null };
+  if (!fetchResult.ok) return { reason: `gmgn unavailable (${fetchResult.reason})`, metrics: null };
+  const metrics = gmgnMetrics(fetchResult.data, g);
+  return { reason: rejectGmgn(metrics, { ...g, requireData: true }), metrics };
+}
+
 /** GMGN filter from the Advanced Bootcamp summary (phishing/bundling/insiders/top10). */
 export function rejectGmgn(metrics, g) {
   if (!metrics) return g.requireData ? "gmgn data unavailable" : null;

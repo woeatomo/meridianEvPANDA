@@ -238,6 +238,7 @@ export function buildEvilPandaConfig(e = {}) {
   const entry = pick(e.entry, {
     freshBreakCandles: 1,       // break above Supertrend must be within the last N closed candles
     maxPriceMovePct: 5,         // abort if price moved more than this between signal and submit
+    maxEntryDelayMin: 5,        // skip entries if the cycle runs later than this after the candle close
     watchlistTtlHours: 6,
     rescreenMin: 30,
     maxWatchlist: 40,
