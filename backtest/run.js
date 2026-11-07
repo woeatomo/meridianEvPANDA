@@ -11,6 +11,7 @@
 //   --max N          cap number of tokens (default 60)
 //   --out DIR        report folder (default backtest/results)
 //   --refresh        ignore the local data cache
+//   --debug          print every GeckoTerminal request and how many candles it returned
 //
 // Data is cached in backtest/cache/ so re-runs (other settings) are offline.
 
@@ -56,17 +57,37 @@ async function gecko(url) {
 function cached(key, fn) {
   const file = path.join(cacheDir, `${key.replace(/[^\w.-]/g, "_")}.json`);
   if (!has("refresh") && fs.existsSync(file)) return Promise.resolve(JSON.parse(fs.readFileSync(file, "utf8")));
-  return fn().then(data => { fs.writeFileSync(file, JSON.stringify(data)); return data; });
+  // Empty results are never cached, so a temporary API problem doesn't stick.
+  return fn().then(data => {
+    const empty = data == null || (Array.isArray(data) && data.length === 0);
+    if (!empty) fs.writeFileSync(file, JSON.stringify(data));
+    return data;
+  });
 }
 
 /** 15m USD candles for `token` in `pool` between [from, to], paging backwards. */
 async function fetchCandles(pool, token, from, to) {
+  const out = await fetchCandlesAs(pool, token, from, to);
+  // Some pools only answer with token=base/quote; try those before giving up.
+  if (out.length || token === "base") return out;
+  for (const side of ["base", "quote"]) {
+    const alt = await fetchCandlesAs(pool, side, from, to);
+    if (alt.length) { debug(`   ${pool.slice(0, 8)}: token=${token.slice(0, 6)} empty, using token=${side}`); return alt; }
+  }
+  return out;
+}
+
+const debug = (...a) => { if (has("debug")) console.log(...a); };
+
+async function fetchCandlesAs(pool, token, from, to) {
   const all = new Map();
   let before = Math.floor(to / 1000);
   for (let page = 0; page < 30; page++) {
     const q = new URLSearchParams({ aggregate: "15", limit: "1000", currency: "usd", token, before_timestamp: String(before) });
-    const data = await gecko(`${GECKO}/pools/${pool}/ohlcv/minute?${q}`);
+    const url = `${GECKO}/pools/${pool}/ohlcv/minute?${q}`;
+    const data = await gecko(url);
     const list = data?.data?.attributes?.ohlcv_list ?? [];
+    if (page === 0) debug(`   GET ${url} → ${list.length} candles${list.length ? ` (${new Date(list.at(-1)[0] * 1000).toISOString()} … ${new Date(list[0][0] * 1000).toISOString()})` : ""}`);
     if (!list.length) break;
     let earliest = Infinity;
     for (const [t, o, h, l, c, v] of list) {
@@ -160,16 +181,29 @@ const FEE_SCENARIOS = { rendah: 0.5, sedang: 1, tinggi: 2 };
 const targets = loadTargets();
 console.log(`Backtest ${targets.length} token(s) — variants: ${Object.keys(VARIANTS).join(", ")}`);
 
-let solPool;
+let solPools;
 try {
-  solPool = await cached("sol-usd-pool", async () => {
-    const address = (await gecko(`${GECKO}/tokens/${SOL}/pools?page=1`))?.data?.[0]?.attributes?.address;
-    if (!address) throw new Error("no SOL/USD pool found");
-    return address;
+  solPools = await cached("sol-usd-pools", async () => {
+    const list = (await gecko(`${GECKO}/tokens/${SOL}/pools?page=1`))?.data ?? [];
+    const addrs = list.map(p => p?.attributes?.address).filter(Boolean).slice(0, 5);
+    if (!addrs.length) throw new Error("no SOL/USD pool found");
+    return addrs;
   });
 } catch (e) {
   console.error(`Cannot reach GeckoTerminal (${e.cause?.code ?? e.message}). The backtest needs internet — run it on the VPS.`);
   process.exit(1);
+}
+
+/** SOL/USD 15m candles for a window, trying the most liquid SOL pools in turn. */
+async function solCandles(from, to) {
+  return cached(`sol-${Math.floor(from / DAY)}-${Math.floor(to / DAY)}`, async () => {
+    for (const pool of solPools) {
+      const ks = await fetchCandlesAs(pool, SOL, from, to).catch(() => []);
+      if (ks.length) return ks;
+      debug(`   SOL pool ${pool.slice(0, 8)} returned no candles, trying next`);
+    }
+    return [];
+  });
 }
 const results = Object.fromEntries(Object.keys(VARIANTS).map(v => [v, Object.fromEntries(Object.keys(FEE_SCENARIOS).map(f => [f, []]))]));
 const perToken = [];
@@ -180,14 +214,15 @@ for (const [n, t] of targets.entries()) {
     const pool = await cached(`pool-${t.mint}`, () => poolInfo(t));
     if (!pool) { console.log(`${label} skipped: no DLMM pool / bin step`); perToken.push({ mint: t.mint, skipped: "no pool" }); continue; }
     const raw = await cached(`c15-${pool.address}-${Math.floor(t.from / DAY)}-${Math.floor(t.to / DAY)}`, () => fetchCandles(pool.address, t.mint, t.from, t.to));
-    const sol = await cached(`sol-${Math.floor(t.from / DAY)}-${Math.floor(t.to / DAY)}`, () => fetchCandles(solPool, SOL, t.from, t.to));
+    const sol = await solCandles(t.from, t.to);
+    if (!sol.length) { console.log(`${label} skipped: SOL/USD price history unavailable for ${new Date(t.from).toISOString().slice(0, 10)}…${new Date(t.to).toISOString().slice(0, 10)}`); perToken.push({ mint: t.mint, name: pool.name, skipped: "no SOL price history" }); continue; }
     const solAt = new Map(sol.map(k => [k.t, k.c]));
     let lastSol = sol[0]?.c;
     const candles = raw.map(k => {
       lastSol = solAt.get(k.t) ?? lastSol;
       return { t: k.t, o: k.o / lastSol, h: k.h / lastSol, l: k.l / lastSol, c: k.c / lastSol, vUsd: k.vUsd, solUsd: lastSol };
     }).filter(k => k.solUsd > 0);
-    if (candles.length < 80) { console.log(`${label} skipped: only ${candles.length} candles`); perToken.push({ mint: t.mint, name: pool.name, skipped: "not enough candles" }); continue; }
+    if (candles.length < 80) { console.log(`${label} skipped: only ${candles.length} candles (pool ${pool.address.slice(0, 8)}: ${raw.length} raw, SOL: ${sol.length}) — run with --debug to see the API calls`); perToken.push({ mint: t.mint, name: pool.name, skipped: "not enough candles" }); continue; }
     const startIndex = Math.max(60, candles.findIndex(k => k.t >= t.evalFrom));
     const row = { mint: t.mint, name: pool.name, binStep: pool.binStep, feePct: pool.feePct, assumedPool: pool.assumed, candles: candles.length, old: t.old };
     for (const [vName, cfg] of Object.entries(VARIANTS)) {
