@@ -18,6 +18,19 @@ node cli.js ep-watchlist               # candidates the engine is tracking
 npm test                               # includes test/evilpanda.test.js
 ```
 
+### Backtest (run on the VPS — needs internet)
+
+```sh
+npm run backtest -- --lessons /path/to/old-bot/lessons.json   # tokens + time windows from your old bot
+npm run backtest -- --mints MINT1,MINT2 --days 30
+```
+
+Simulates the chart rules (entry on Supertrend break, range, every exit rule) with the same code as the live bot, for four variants (`config-kamu`, `murni-evilpanda`, `range-70`, `spot`) and three fee scenarios. Writes `backtest/results/backtest-*.md` and `trades-*.csv`; downloaded candles are cached in `backtest/cache/`. Rugcheck/GMGN filters cannot be backtested and fees are estimates — compare variants, don't read the numbers as a profit forecast.
+
+### Paper trading (shadow mode)
+
+With `shadowMode: true` and `evilPanda.paper.enabled` (default), every "would deploy" opens a simulated position priced from live Meteora data every minute and closed by the same exit rules. `node cli.js paper` shows results; Telegram gets 📝 alerts. Nothing touches the wallet.
+
 Set `evilPanda.enabled: false` to get the original wallet-convergence behaviour back.
 
 ---

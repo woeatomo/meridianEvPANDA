@@ -251,3 +251,65 @@ test("config: user overrides merge with defaults", () => {
   assert.equal(c.enabled, true);
   assert.equal(buildEvilPandaConfig({ enabled: false }).enabled, false);
 });
+
+// ─── Simulator / backtest / paper ────────────────────────────────────────────
+import { buildBins, valueAt, positionView } from "../evilpanda/sim.js";
+import { simulateMint, summarize } from "../evilpanda/backtest-core.js";
+
+test("sim: value is full capital above entry, falls monotonically below, bid-ask weights the bottom", () => {
+  const bins = buildBins({ capitalSol: 1, entryPrice: 1, binStep: 100, binsBelow: 100, shape: "bid_ask" });
+  assert.ok(bins.at(-1).y > bins[0].y);
+  assert.ok(Math.abs(bins.reduce((a, b) => a + b.y, 0) - 1) < 1e-9);
+  assert.ok(Math.abs(valueAt(bins, 1.5).value - 1) < 1e-9);
+  let prev = 1;
+  for (const p of [0.9, 0.7, 0.5, 0.3, 0.1]) { const v = valueAt(bins, p).value; assert.ok(v < prev); prev = v; }
+  const spot = buildBins({ capitalSol: 1, entryPrice: 1, binStep: 100, binsBelow: 100, shape: "spot" });
+  assert.ok(valueAt(bins, 0.6).value > valueAt(spot, 0.6).value, "bid-ask converts less SOL early in a dump");
+  assert.equal(positionView(bins, 100, 2).active_bin > 99, true, "above range");
+  assert.equal(positionView(bins, 100, 0.0001).active_bin < 0, true, "below range");
+});
+
+function synthCandles() {
+  const ks = [];
+  let p = 1;
+  const push = (c, v = 50_000) => { const o = p; ks.push({ t: ks.length * 900_000, o, h: Math.max(o, c) * 1.005, l: Math.min(o, c) * 0.995, c, vUsd: v, solUsd: 150 }); p = c; };
+  for (let i = 0; i < 80; i++) push(p * 0.99);          // downtrend
+  for (let i = 0; i < 6; i++) push(p * 1.06);           // breakout → Supertrend flips up
+  for (let i = 0; i < 30; i++) push(p * (i % 2 ? 1.02 : 0.97)); // chop down, fees accrue
+  push(p * 0.3, 500_000);                               // rug candle
+  for (let i = 0; i < 20; i++) push(p * 0.99);
+  return ks;
+}
+
+test("backtest: enters on the Supertrend break, exits by a rule, costs and fees are applied", () => {
+  const cfgBt = { management: mgmt, exits: ep.exits, range: ep.range, shape: ep.shape, chart: ep.chart, costs: { txSol: 0.003, swapSlippagePct: 1 } };
+  const trades = simulateMint({ candles: synthCandles(), pool: { binStep: 100, feePct: 2, activeTvlUsd: 30_000 }, cfg: cfgBt, startIndex: 60 });
+  assert.ok(trades.length >= 1, "at least one trade");
+  for (const t of trades) {
+    assert.ok(Number.isFinite(t.pnlPct));
+    assert.ok(t.exitT >= t.entryT);
+    assert.ok(t.feesPct >= 0);
+  }
+  const first = trades[0];
+  assert.ok(first.entryT > 80 * 900_000, "entry after the breakout, not during the downtrend");
+  const s = summarize(trades);
+  assert.equal(s.trades, trades.length);
+  // Higher fee scenario never makes results worse.
+  const hi = simulateMint({ candles: synthCandles(), pool: { binStep: 100, feePct: 2, activeTvlUsd: 30_000 }, cfg: cfgBt, feeMult: 2, startIndex: 60 });
+  assert.ok(hi[0].feesPct >= first.feesPct);
+});
+
+test("backtest: a gap through the stop fills at the open, otherwise at the stop level", () => {
+  const cfgBt = { management: mgmt, exits: { ...ep.exits, oorBelowWaitMinutes: Infinity, lowYieldMinFeePerTvl24h: null, stConfluence: false }, range: ep.range, shape: { ...ep.shape, default: "spot" }, chart: ep.chart, costs: { txSol: 0, swapSlippagePct: 0 } };
+  const trades = simulateMint({ candles: synthCandles(), pool: { binStep: 100, feePct: 0.0001, activeTvlUsd: 1e12 }, cfg: { ...cfgBt, management: { ...mgmt, takeProfitPct: null, trailingTakeProfit: false } }, startIndex: 60 });
+  const sl = trades.find(t => t.rule === "STOP_LOSS");
+  assert.ok(sl, "stop loss hit");
+  assert.ok(sl.pnlPct <= -14.9, `stop at or below -15% (got ${sl.pnlPct})`);
+});
+
+test("OOR above respects oorAboveMinPnlPct", () => {
+  const above = { dir: "above", since: 0 };
+  const strict = { ...cfg, exits: { ...cfg.exits, oorAboveMinPnlPct: 1 } };
+  assert.equal(fastExitDecision(pos({ active_bin: 150, pnl_pct: 0.2 }), { oor: above }, strict, 31 * 60_000), null);
+  assert.equal(fastExitDecision(pos({ active_bin: 150, pnl_pct: 1.2 }), { oor: above }, strict, 31 * 60_000).rule, "OOR_ABOVE");
+});

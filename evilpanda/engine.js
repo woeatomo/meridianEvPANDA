@@ -27,9 +27,12 @@ import { snapshot, candlesSinceBreakUp, supertrend } from "./indicators.js";
 import { rejectTokenBasics, rejectRugcheck, rejectGmgnFetch, rejectPool, rankPools, chooseShape } from "./filters.js";
 import { fastExitDecision, candleExitDecision, updateOor, narrativeProxyHealthy } from "./exits.js";
 import { entryVeto, lowYieldVeto } from "./llm.js";
+import { binsForDownsidePct } from "./range.js";
+import * as paper from "./paper.js";
 
 const STATE_FILE = repoPath("evilpanda-state.json");
 const ep = () => config.evilpanda;
+const paperOn = () => config.standalone.shadow && ep().paper.enabled;
 
 // ─── Persistent state ───────────────────────────────────────────────────────
 
@@ -212,8 +215,9 @@ async function tryEntries() {
   try {
     const live = await getMyPositions({ force: true }).catch(() => null);
     if (!live || live.error || !Array.isArray(live.positions)) { log("ep_entry", "position read unavailable — no entries this candle"); return; }
-    let open = live.positions.length;
-    const heldMints = new Set(live.positions.map(p => p.base_mint).filter(Boolean));
+    const paperOpen = paperOn() ? paper.openPaperPositions() : [];
+    let open = live.positions.length + paperOpen.length;
+    const heldMints = new Set([...live.positions.map(p => p.base_mint), ...paperOpen.map(p => p.mint)].filter(Boolean));
     const candidates = Object.values(state.watchlist).filter(w => w.pass && !heldMints.has(w.mint));
     for (const w of candidates) {
       if (open >= config.risk.maxPositions) break;
@@ -305,7 +309,18 @@ async function attemptEntry(w, snap) {
   rec.position = result.position ?? rec.position;
   rec.amountSol = amountY;
   store.save();
-  if (rec.position) {
+  if (result.dry_run && paperOn()) {
+    const pp = paper.openPaper({
+      mint: w.mint, pool: w.poolAddress, symbol: w.tokenFacts?.symbol, entryPrice: basePrice,
+      binStep: Number(result.would_deploy?.bin_step ?? w.binStep),
+      binsBelow: Number(result.would_deploy?.bins_below ?? binsForDownsidePct(e.range.targetDownsidePct, w.binStep)),
+      shape: shape.strategy, capitalSol: amountY, sources: w.sources,
+    });
+    rec.position = pp.id;
+    store.save();
+    log("ep_paper", `📝 opened ${pp.id}: ${amountY} SOL ${shape.strategy}, ${pp.binsBelow} bins @ ${basePrice}`);
+  }
+  if (rec.position && !String(rec.position).startsWith("paper-")) {
     state.positions[rec.position] = { mint: w.mint, pool: w.poolAddress, strategy: shape.strategy, enteredAt: Date.now(), oor: null };
     saveState();
   }
@@ -335,8 +350,8 @@ export async function evaluateFastExit(p, { resolveSlow = true } = {}) {
     rec.oor = nextOor;
     saveState();
   }
-  const tracked = getTrackedPosition(p.position);
-  const decision = fastExitDecision(p, { peakPnlPct: tracked?.peak_pnl_pct ?? null, oor: rec.oor }, { management: config.management, exits: ep().exits });
+  const peakPnlPct = p.paper ? paper.paperPeak(p.position) : getTrackedPosition(p.position)?.peak_pnl_pct ?? null;
+  const decision = fastExitDecision(p, { peakPnlPct, oor: rec.oor }, { management: config.management, exits: ep().exits });
   if (!decision) return null;
   if (decision.action === "CLOSE") return decision;
   // Low yield needs network (candles, maybe LLM). The 3s poller never waits on it,
@@ -380,7 +395,20 @@ async function resolveLowYield(p, rec, reason) {
 
 const recentlyClosed = new Map(); // position → { at, dryRun }
 
+function closePaperPosition(p, decision) {
+  const t = paper.closePaper(p.position, { rule: decision.rule, reason: decision.reason });
+  if (!t) return;
+  delete state.positions[p.position];
+  delete state.lowYieldHolds[p.position];
+  saveState();
+  const attempt = store?.data.attempts[t.mint];
+  if (attempt?.position === p.position) { attempt.status = "closed"; store.save(); }
+  log("ep_paper", `📝 closed ${t.symbol ?? t.mint.slice(0, 8)}: ${decision.rule} → ${t.pnlPct.toFixed(2)}% (${t.pnlSol.toFixed(4)} SOL, fees ${t.feesSol.toFixed(4)}) after ${t.heldMin}m — ${decision.reason}`);
+  void notify(`📝 Paper close ${t.symbol ?? t.mint.slice(0, 8)}: ${decision.rule} ${t.pnlPct >= 0 ? "+" : ""}${t.pnlPct.toFixed(2)}% (${t.pnlSol.toFixed(4)} SOL) — ${decision.reason}`);
+}
+
 async function closePosition(p, decision) {
+  if (p.paper) return closePaperPosition(p, decision);
   if (closing.has(p.position)) return;
   // Poller, management cycle and candle job read positions independently; a list
   // read before a close finished must not trigger a second close (or, in shadow
@@ -425,6 +453,46 @@ async function candleExits() {
   }
 }
 
+// ─── Paper trading ──────────────────────────────────────────────────────────
+
+let paperBusy = false;
+const paperViews = new Map();
+
+async function paperTick() {
+  if (paperBusy || !paperOn()) return;
+  paperBusy = true;
+  try {
+    for (const pp of paper.openPaperPositions()) {
+      try {
+        const pool = await src.discoveryPool(pp.pool, "5m");
+        const view = paper.markPaper(pp.id, pool, { nearSpanBins: ep().paper.nearSpanBins });
+        if (!view) continue;
+        paperViews.set(pp.id, view);
+        const d = await evaluateFastExit(view);
+        if (d) closePaperPosition(view, d);
+      } catch (err) { log("ep_paper", `${pp.symbol ?? pp.mint.slice(0, 8)} mark failed: ${err.message}`); }
+    }
+  } finally {
+    paperBusy = false;
+  }
+}
+
+async function paperCandleExits() {
+  for (const pp of paper.openPaperPositions()) {
+    const view = paperViews.get(pp.id);
+    if (!view) continue;
+    try {
+      const { snap, stale } = await candleSnapshot(pp.mint, pp.pool, { requireLatest: true });
+      if (stale) continue;
+      const d = candleExitDecision(snap, { exits: ep().exits });
+      if (snap) log("ep_paper", `${view.pair} 15m: ST ${snap.stDirection}, RSI2 ${snap.rsi.toFixed(0)}, >BB ${snap.aboveBbUpper}, MACD1st ${snap.macdFirstGreen}`);
+      if (d) closePaperPosition(view, d);
+    } catch (err) { log("ep_paper", `${view.pair} candle exit check failed: ${err.message}`); }
+  }
+}
+
+export const paperSummary = paper.paperSummary;
+
 // ─── Scheduling ─────────────────────────────────────────────────────────────
 
 async function onCandleClose() {
@@ -433,6 +501,7 @@ async function onCandleClose() {
   try {
     pruneWatchlist();
     await candleExits();       // exits first, then entries; rescreening runs on its own timer
+    if (paperOn()) await paperCandleExits();
     await tryEntries();
   } catch (e) {
     log("ep_warn", `candle cycle failed: ${e.message}`);
@@ -464,6 +533,10 @@ export function startEngine({ monitorStore, notifyFn }) {
     timers.discord = setInterval(() => void runDiscord(), Math.max(15, e.discord.pollSec) * 1000);
   }
   scheduleCandles();
+  if (paperOn()) {
+    void paperTick();
+    timers.paper = setInterval(() => void paperTick(), Math.max(15, ep().paper.pollSec) * 1000);
+  }
   const rescreen = async () => {
     if (rescreenBusy) return;
     rescreenBusy = true;
@@ -471,7 +544,7 @@ export function startEngine({ monitorStore, notifyFn }) {
   };
   void rescreen();
   timers.rescreen = setInterval(() => void rescreen(), 2 * 60_000);
-  log("ep", `EvilPanda engine started — sources: ${Object.entries(e.sources).filter(([, v]) => v).map(([k]) => k).join(", ")} | range -${e.range.targetDownsidePct}% (min -${e.range.minDownsidePct}%, rent-free=${e.range.shrinkToInitialized}) | shape ${e.shape.default}${e.shape.autoSpot ? "/auto-spot" : ""} | LLM ${e.llm.enabled ? e.llm.model : "off"} | GMGN ${e.gmgn.apiKey ? "on" : "no key → skipped"}`);
+  log("ep", `EvilPanda engine started — sources: ${Object.entries(e.sources).filter(([, v]) => v).map(([k]) => k).join(", ")} | range -${e.range.targetDownsidePct}% (min -${e.range.minDownsidePct}%, rent-free=${e.range.shrinkToInitialized}) | shape ${e.shape.default}${e.shape.autoSpot ? "/auto-spot" : ""} | paper ${paperOn() ? "on" : "off"} | LLM ${e.llm.enabled ? e.llm.model : "off"} | GMGN ${e.gmgn.apiKey ? "on" : "no key → skipped"}`);
 }
 
 export function stopEngine() {

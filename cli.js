@@ -16,6 +16,7 @@ Commands:
   manage                          Run one deterministic management pass
   ep-screen --mint ADDRESS        EvilPanda screen + 15m indicators for one mint (read-only)
   ep-watchlist                    Show EvilPanda candidates and why they pass/fail
+  paper                           Paper-trading results (shadow mode simulated positions)
   close --position ADDRESS [--reason TEXT] [--skip-swap]
   claim --position ADDRESS
   swap --from MINT --to MINT --amount NUMBER
@@ -82,6 +83,7 @@ async function main() {
       return out({ pass: screened.pass, reason: screened.reason, pool: screened.pool?.pool_address ?? null, binStep: screened.pool?.dlmm_params?.bin_step ?? null, rugcheckScore: screened.rugcheck?.score_normalised ?? null, gmgn: screened.gmgn ?? null, chart });
     }
     case 'ep-watchlist': return out((await import('./evilpanda/engine.js')).watchlistSummary());
+    case 'paper': return out((await import('./evilpanda/paper.js')).paperSummary());
     case 'close': case 'claim': case 'swap': {
       const { executeTool } = await import('./tools/executor.js');
       if (cmd === 'close') return out(await executeTool('close_position', { position_address: requireFlag('position'), reason: flags.reason || 'manual close', skip_swap: !!flags['skip-swap'] }));

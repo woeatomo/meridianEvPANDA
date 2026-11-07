@@ -262,11 +262,17 @@ export function buildEvilPandaConfig(e = {}) {
   const exits = pick(e.exits, {
     stConfluence: true,
     oorAboveWaitMinutes: 30,
+    oorAboveMinPnlPct: 0,       // OOR-above exit needs PnL above this (0 = any profit)
     oorBelowWaitMinutes: 60,
     lowYieldMinFeePerTvl24h: 10,
     lowYieldMinAgeMinutes: 60,
     narrativeProxy: true,
     minVolumeRatio: 0.5,        // last 6h volume vs previous 6h (1h candles)
+  });
+  const paper = pick(e.paper, {
+    enabled: true,              // only active in shadow mode: every "would deploy" becomes a simulated position
+    pollSec: 60,
+    nearSpanBins: 3,            // our liquidity within ±N bins of the price counts for the fee estimate
   });
   const llm = pick(e.llm, {
     enabled: false,
@@ -280,7 +286,7 @@ export function buildEvilPandaConfig(e = {}) {
   llm.apiKey = nonEmptyString(process.env.LLM_API_KEY, process.env.OPENROUTER_API_KEY, "");
   return {
     enabled: e.enabled !== false,
-    sources, screener, filters, rugcheck, gmgn, discord, chart, entry, range, pool, shape, exits, llm,
+    sources, screener, filters, rugcheck, gmgn, discord, chart, entry, range, pool, shape, exits, paper, llm,
   };
 }
 

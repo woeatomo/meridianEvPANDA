@@ -126,12 +126,14 @@
     "exits": {
       "stConfluence": true,
       "oorAboveWaitMinutes": 30,
+      "oorAboveMinPnlPct": 0,
       "oorBelowWaitMinutes": 60,
       "lowYieldMinFeePerTvl24h": 10,
       "lowYieldMinAgeMinutes": 60,
       "narrativeProxy": true,
       "minVolumeRatio": 0.5
     },
+    "paper": { "enabled": true, "pollSec": 60, "nearSpanBins": 3 },
     "llm": {
       "enabled": false,
       "baseUrl": "https://openrouter.ai/api/v1",

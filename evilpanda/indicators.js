@@ -141,19 +141,38 @@ export function supertrend(candles, period = 10, multiplier = 3) {
  * closed candle. Returns null when there is not enough history.
  */
 export function snapshot(candles, opts = {}) {
-  const o = {
-    stPeriod: 10, stMultiplier: 3, rsiPeriod: 2, rsiUpper: 90,
-    bbPeriod: 20, bbStdDev: 2, macdFast: 12, macdSlow: 26, macdSignal: 9,
-    ...opts,
-  };
-  const minNeeded = Math.max(o.stPeriod + 2, o.bbPeriod + 1, o.macdSlow + o.macdSignal + 1);
-  if (!Array.isArray(candles) || candles.length < minNeeded) return null;
+  if (!Array.isArray(candles) || candles.length < 2) return null;
+  return snapshotAt(series(candles, opts), candles.length - 1);
+}
+
+const DEFAULTS = {
+  stPeriod: 10, stMultiplier: 3, rsiPeriod: 2, rsiUpper: 90,
+  bbPeriod: 20, bbStdDev: 2, macdFast: 12, macdSlow: 26, macdSignal: 9,
+};
+
+/**
+ * Every indicator over the whole series at once. Each value at index i only
+ * uses candles ≤ i, so snapshotAt(series, i) equals snapshot(candles[0..i]) —
+ * this is what lets the backtest run without lookahead in O(n).
+ */
+export function series(candles, opts = {}) {
+  const o = { ...DEFAULTS, ...opts };
   const closes = candles.map(k => k.c);
-  const st = supertrend(candles, o.stPeriod, o.stMultiplier);
-  const r = rsi(closes, o.rsiPeriod);
-  const m = macd(closes, o.macdFast, o.macdSlow, o.macdSignal);
-  const bb = bollinger(closes, o.bbPeriod, o.bbStdDev);
-  const i = candles.length - 1;
+  return {
+    o,
+    candles,
+    closes,
+    minNeeded: Math.max(o.stPeriod + 2, o.bbPeriod + 1, o.macdSlow + o.macdSignal + 1),
+    st: supertrend(candles, o.stPeriod, o.stMultiplier),
+    r: rsi(closes, o.rsiPeriod),
+    m: macd(closes, o.macdFast, o.macdSlow, o.macdSignal),
+    bb: bollinger(closes, o.bbPeriod, o.bbStdDev),
+  };
+}
+
+export function snapshotAt(s, i) {
+  const { o, candles, closes, st, r, m, bb } = s;
+  if (i < 1 || i + 1 < s.minNeeded) return null;
   if (st[i] == null || st[i - 1] == null || r[i] == null || m.hist[i] == null || m.hist[i - 1] == null || bb.upper[i] == null) return null;
   const close = closes[i];
   const rsiOver = r[i] > o.rsiUpper;

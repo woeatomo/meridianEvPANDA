@@ -51,9 +51,9 @@ export function fastExitDecision(p, ctx, cfg, now = Date.now()) {
   if (oor?.dir && oor.since != null) {
     const minutes = (now - oor.since) / 60_000;
     if (oor.dir === "above") {
-      // Positive PnL: exit once it has stayed OOR-above for the wait period and is still positive.
+      // Positive PnL (above oorAboveMinPnlPct, default 0): exit once it has stayed OOR-above for the wait period.
       // Negative PnL: hold and let price come back; the stop loss above is the only exit.
-      if (pnlOk && pnl > 0 && minutes >= e.oorAboveWaitMinutes) {
+      if (pnlOk && pnl > (e.oorAboveMinPnlPct ?? 0) && minutes >= e.oorAboveWaitMinutes) {
         return { action: "CLOSE", rule: "OOR_ABOVE", reason: `OOR above ${Math.floor(minutes)}m with PnL +${pnl.toFixed(2)}%` };
       }
     } else if (oor.dir === "below" && minutes >= e.oorBelowWaitMinutes) {
