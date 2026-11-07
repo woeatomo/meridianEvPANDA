@@ -9,6 +9,7 @@ import { series, snapshotAt, supertrend } from "./indicators.js";
 import { fastExitDecision, candleExitDecision, updateOor, narrativeProxyHealthy } from "./exits.js";
 import { binsForDownsidePct } from "./range.js";
 import { buildBins, valueAt, positionView, liquidityNearPrice, feeEstimate, activeIndex } from "./sim.js";
+import { chooseDepth } from "./adaptive.js";
 
 const H = 3_600_000;
 
@@ -43,7 +44,6 @@ export function simulateMint({ candles, pool, cfg, feeMult = 1, startIndex = 0 }
   const hr = hourly(candles);
   const hrSt = supertrend(hr.out, cfg.chart.stPeriod, cfg.chart.stMultiplier);
   const costs = { txSol: 0.003, swapSlippagePct: 1, ...(cfg.costs || {}) };
-  const binsBelow = Math.max(35, binsForDownsidePct(cfg.range.targetDownsidePct, pool.binStep));
   let pos = null;
 
   const close = (i, price, rule, reason) => {
@@ -52,7 +52,7 @@ export function simulateMint({ candles, pool, cfg, feeMult = 1, startIndex = 0 }
     const final = v.value + pos.fees - slippage - costs.txSol;
     trades.push({
       entryT: pos.t0, exitT: candles[i].t, heldMin: Math.round((candles[i].t - pos.t0) / 60_000),
-      rule, reason, shape: pos.shape, binsBelow,
+      rule, reason, shape: pos.shape, binsBelow: pos.binsBelow, depthPct: pos.depthPct, atrPct: pos.atrPct, pumpPct: pos.pumpPct,
       pnlPct: (final / pos.capital - 1) * 100,
       feesPct: pos.fees / pos.capital * 100,
       priceMovePct: (price / pos.p0 - 1) * 100,
@@ -122,8 +122,12 @@ export function simulateMint({ candles, pool, cfg, feeMult = 1, startIndex = 0 }
     const shape = cfg.shape.default;
     const capital = 1;
     const feeLog = [];
+    // Same depth logic as the live bot, on candles known at the signal close (no lookahead).
+    const depth = chooseDepth(candles.slice(Math.max(0, i - 200), i + 1), cfg.range);
+    const binsBelow = Math.max(35, binsForDownsidePct(depth.depthPct, pool.binStep));
     pos = {
       t0: next.t, p0, capital, shape, fees: 0, feeLog, oor: null, peak: null,
+      binsBelow, depthPct: depth.depthPct, atrPct: depth.atrPct, pumpPct: depth.pumpPct,
       bins: buildBins({ capitalSol: capital, entryPrice: p0, binStep: pool.binStep, binsBelow, shape }),
       fee24h: () => {
         const last = feeLog.slice(-96).reduce((a, b) => a + b, 0);

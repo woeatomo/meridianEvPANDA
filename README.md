@@ -7,7 +7,7 @@ This fork runs the **Evil Panda strat** (LogicalTA, Advanced Bootcamp #7) on top
 1. **Candidates** from three sources (each can be switched off in `evilPanda.sources`): the Meteora pool screener (newest tokens first), the Discord LP-call relay served by the Agent Meridian API (read-only, no Discord account), and smart-wallet convergence.
 2. **Screen**: Jupiter basics (mcap ≥ $250k, 24h volume ≥ $1M, fees > 30 SOL, top10 < 30%, image present, mint/freeze revoked), Rugcheck (score, danger risks, blocked risk names), GMGN (phishing < 30%, bundling < 60%, insiders < 10%, top10 < 30%; skipped when `GMGN_API_KEY` is missing), then the best token/SOL DLMM pool (highest bin step first).
 3. **Entry** only on a 15m candle that closes above Supertrend (fresh break). Optional LLM narrative veto. Shape is bid-ask, or spot when the token meets every stability criterion in `evilPanda.shape.spot`.
-4. **Range** 0% → −85% single-side SOL. If that needs bin arrays that do not exist yet, the range is shortened to the existing ones so **no non-refundable rent is ever paid**; pools that end up shallower than −50% are skipped.
+4. **Range** single-side SOL, adaptive by default: depth from the token's 15m ATR% (calm → −50%, wild → −85%, +10% after a 2× pump, cap −90%; `evilPanda.range.mode: "fixed"` uses `targetDownsidePct`). The pool is picked at entry by expected fee for our position: 1h fee/active-TVL ÷ bins needed for that depth (`evilPanda.pool.ranking`). Calibrate `atrLowPct`/`atrHighPct` from the backtest report. If that needs bin arrays that do not exist yet, the range is shortened to the existing ones so **no non-refundable rent is ever paid**; pools that end up shallower than −50% are skipped.
 5. **Exits** (first to trigger wins): stop loss −15%, take profit +5%, trailing (3% trigger / 1.5% drop), OOR above (close after 30 min only if PnL is still positive; negative PnL holds until the stop loss), OOR below (close after 60 min), low yield (< 10 fee/TVL after 60 min unless 1h volume and 1h Supertrend show the token is still alive, or the LLM says hold), and the EvilPanda exit: Supertrend broken on 15m + RSI(2) > 90 with a close above the BB upper band or the first green MACD bar.
 
 Indicators are computed locally from GeckoTerminal candles (TradingView conventions). All thresholds live in the `evilPanda` block of `user-config.json`; see `user-config.example.json`.
@@ -25,7 +25,7 @@ npm run backtest -- --lessons /path/to/old-bot/lessons.json   # tokens + time wi
 npm run backtest -- --mints MINT1,MINT2 --days 30
 ```
 
-Simulates the chart rules (entry on Supertrend break, range, every exit rule) with the same code as the live bot, for four variants (`config-kamu`, `murni-evilpanda`, `range-70`, `spot`) and three fee scenarios. Writes `backtest/results/backtest-*.md` and `trades-*.csv`; downloaded candles are cached in `backtest/cache/`. Rugcheck/GMGN filters cannot be backtested and fees are estimates — compare variants, don't read the numbers as a profit forecast.
+Simulates the chart rules (entry on Supertrend break, range, every exit rule) with the same code as the live bot, for several variants (`config-kamu`, `murni-evilpanda`, fixed ranges −85/−70/−50%, `spot`, `oor-atas-min1%`) and three fee scenarios. Writes `backtest/results/backtest-*.md` and `trades-*.csv`; downloaded candles are cached in `backtest/cache/`. Rugcheck/GMGN filters cannot be backtested and fees are estimates — compare variants, don't read the numbers as a profit forecast.
 
 ### Paper trading (shadow mode)
 

@@ -140,7 +140,7 @@ const ep = config.evilpanda;
 const base = {
   management: { ...config.management },
   exits: { ...ep.exits },
-  range: { ...ep.range },
+  range: { ...ep.range, adaptive: { ...ep.range.adaptive } },
   shape: { ...ep.shape },
   chart: { ...ep.chart },
   costs: { txSol: 0.003, swapSlippagePct: 1 },
@@ -148,7 +148,9 @@ const base = {
 const VARIANTS = {
   "config-kamu": base,
   "murni-evilpanda": { ...base, management: { ...base.management, takeProfitPct: null, trailingTakeProfit: false }, exits: { ...base.exits, oorAboveWaitMinutes: Infinity, oorBelowWaitMinutes: Infinity, lowYieldMinFeePerTvl24h: null } },
-  "range-70": { ...base, range: { ...base.range, targetDownsidePct: 70 } },
+  "range-85-tetap": { ...base, range: { ...base.range, mode: "fixed", targetDownsidePct: 85 } },
+  "range-70-tetap": { ...base, range: { ...base.range, mode: "fixed", targetDownsidePct: 70 } },
+  "range-50-tetap": { ...base, range: { ...base.range, mode: "fixed", targetDownsidePct: 50 } },
   "spot": { ...base, shape: { ...base.shape, default: "spot" } },
   "oor-atas-min1%": { ...base, exits: { ...base.exits, oorAboveMinPnlPct: 1 } },
 };
@@ -218,6 +220,23 @@ for (const [v, byFee] of Object.entries(results)) for (const [fName, trades] of 
 }
 lines.push("", "## Alasan exit (config-kamu, fee sedang)", "", "| Rule | Jumlah | Avg PnL % |", "|---|---|---|");
 for (const [rule, r] of Object.entries(summarize(results["config-kamu"].sedang).byRule ?? {})) lines.push(`| ${rule} | ${r.n} | ${f(r.avgPnl)} |`);
+// Calibration data for range.adaptive (ATR% thresholds) and the depth → outcome relation.
+{
+  const tr = results["config-kamu"].sedang;
+  const pct = (xs, q) => { const a = xs.filter(Number.isFinite).sort((x, y) => x - y); return a.length ? a[Math.min(a.length - 1, Math.floor(q * a.length))] : NaN; };
+  const atrs = tr.map(t => t.atrPct);
+  lines.push("", "## Kalibrasi range adaptif (config-kamu, fee sedang)", "",
+    `Mode range: **${base.range.mode}**${base.range.mode === "adaptive" ? ` — ATR% ${base.range.adaptive.atrLowPct} → -${base.range.adaptive.minDepthPct}%, ATR% ${base.range.adaptive.atrHighPct} → -${base.range.adaptive.maxDepthPct}%` : ""}`, "",
+    `ATR% 15m saat entry: p10 ${f(pct(atrs, 0.1))} · p25 ${f(pct(atrs, 0.25))} · median ${f(pct(atrs, 0.5))} · p75 ${f(pct(atrs, 0.75))} · p90 ${f(pct(atrs, 0.9))}`, "",
+    "Saran awal: set `atrLowPct` ≈ p25 dan `atrHighPct` ≈ p75 supaya range benar-benar menyebar antara min dan max.", "",
+    "| Kedalaman range | Trades | Win % | Avg PnL % | Stop loss | OOR bawah |", "|---|---|---|---|---|---|");
+  for (const [lo, hi] of [[0, 60], [60, 70], [70, 80], [80, 101]]) {
+    const b = tr.filter(t => t.depthPct >= lo && t.depthPct < hi);
+    if (!b.length) continue;
+    const sb = summarize(b);
+    lines.push(`| -${lo}…-${Math.min(hi, 100)}% | ${sb.trades} | ${f(sb.winRatePct, 0)} | ${f(sb.avgPnlPct)} | ${b.filter(t => t.rule === "STOP_LOSS").length} | ${b.filter(t => t.rule === "OOR_BELOW").length} |`);
+  }
+}
 lines.push("", "## Per token (config-kamu, fee sedang) vs bot lama", "", "| Token | Bin step | Trades | Avg PnL % backtest | Bot lama: posisi / avg PnL % |", "|---|---|---|---|---|");
 for (const r of perToken) {
   if (r.skipped) { lines.push(`| ${r.name ?? r.mint.slice(0, 8)} | - | skipped: ${r.skipped} | - | - |`); continue; }
@@ -230,13 +249,14 @@ lines.push("## Batasan", "",
   "- Filter Rugcheck/GMGN/holders tidak bisa di-backtest (tidak ada data historis). Semua token dianggap lolos screening.",
   "- Fee adalah perkiraan: volume pool × fee dasar × porsi likuiditas kita di sekitar harga, dengan active TVL hari ini. Skenario rendah/tinggi = ×0.5/×2. Dynamic fee diabaikan.",
   "- Range penuh diasumsikan (biaya bin-array tidak diketahui historis); live bot bisa memendekkan range.",
+  "- Pemilihan pool (skor fee/TVL ÷ jumlah bin) tidak bisa di-backtest: hanya satu pool per token yang disimulasikan. Uji lewat paper trading.",
   "- Batas 3 posisi bersamaan tidak disimulasikan; tiap token dihitung sendiri.",
   "- Harga dari candle 15m; di dalam candle diasumsikan jalur o→l→h→c (hijau) atau o→h→l→c (merah).");
 const reportFile = path.join(outDir, `backtest-${stamp}.md`);
 fs.writeFileSync(reportFile, lines.join("\n"));
-const csv = ["variant,fee,name,mint,entry,exit,held_min,rule,pnl_pct,fees_pct,price_move_pct"];
+const csv = ["variant,fee,name,mint,entry,exit,held_min,rule,pnl_pct,fees_pct,price_move_pct,depth_pct,atr_pct,pump_pct"];
 for (const [v, byFee] of Object.entries(results)) for (const [fName, trades] of Object.entries(byFee)) for (const t of trades) {
-  csv.push([v, fName, JSON.stringify(t.name ?? ""), t.mint, new Date(t.entryT).toISOString(), new Date(t.exitT).toISOString(), t.heldMin, t.rule, f(t.pnlPct, 3), f(t.feesPct, 3), f(t.priceMovePct, 2)].join(","));
+  csv.push([v, fName, JSON.stringify(t.name ?? ""), t.mint, new Date(t.entryT).toISOString(), new Date(t.exitT).toISOString(), t.heldMin, t.rule, f(t.pnlPct, 3), f(t.feesPct, 3), f(t.priceMovePct, 2), f(t.depthPct, 1), f(t.atrPct, 3), f(t.pumpPct, 1)].join(","));
 }
 fs.writeFileSync(path.join(outDir, `trades-${stamp}.csv`), csv.join("\n"));
 console.log(`\nReport: ${reportFile}\nTrades: ${path.join(outDir, `trades-${stamp}.csv`)}`);

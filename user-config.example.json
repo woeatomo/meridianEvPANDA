@@ -106,11 +106,23 @@
       "rescreenMin": 30
     },
     "range": {
+      "mode": "adaptive",
       "targetDownsidePct": 85,
       "minDownsidePct": 50,
-      "shrinkToInitialized": true
+      "shrinkToInitialized": true,
+      "adaptive": {
+        "minDepthPct": 50,
+        "maxDepthPct": 85,
+        "capDepthPct": 90,
+        "atrPeriod": 14,
+        "atrLowPct": 2,
+        "atrHighPct": 8,
+        "pumpLookbackCandles": 96,
+        "pumpThresholdPct": 100,
+        "pumpBoostPct": 10
+      }
     },
-    "pool": { "preferHighBinStep": true },
+    "pool": { "ranking": "expected_fee", "preferHighBinStep": true },
     "shape": {
       "default": "bid_ask",
       "autoSpot": true,

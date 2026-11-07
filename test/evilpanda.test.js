@@ -313,3 +313,43 @@ test("OOR above respects oorAboveMinPnlPct", () => {
   assert.equal(fastExitDecision(pos({ active_bin: 150, pnl_pct: 0.2 }), { oor: above }, strict, 31 * 60_000), null);
   assert.equal(fastExitDecision(pos({ active_bin: 150, pnl_pct: 1.2 }), { oor: above }, strict, 31 * 60_000).rule, "OOR_ABOVE");
 });
+
+// ─── Adaptive range + pool scoring ───────────────────────────────────────────
+import { atrPct, pumpPct, chooseDepth, expectedFeeScore, rankByExpectedFee } from "../evilpanda/adaptive.js";
+
+const wiggle = (n, amp, base = 1) => Array.from({ length: n }, (_, i) => { const c = base * (1 + (i % 2 ? amp : -amp)); return { t: i, o: base, h: c * (1 + amp), l: c * (1 - amp), c, v: 1 }; });
+
+test("ATR%: calm series small, wild series large", () => {
+  assert.ok(atrPct(wiggle(40, 0.005)) < 3);
+  assert.ok(atrPct(wiggle(40, 0.05)) > 8);
+  assert.equal(atrPct(wiggle(5, 0.01)), null);
+});
+
+test("adaptive depth: calm → min, wild → max, in-between interpolates, pump adds the boost, unknown → max", () => {
+  const r = ep.range;
+  assert.equal(r.mode, "adaptive");
+  assert.equal(chooseDepth(wiggle(40, 0.002), r).depthPct, r.adaptive.minDepthPct);
+  assert.equal(chooseDepth(wiggle(40, 0.06), r).depthPct, r.adaptive.maxDepthPct);
+  const mid = chooseDepth(wiggle(40, 0.025), r).depthPct;
+  assert.ok(mid > r.adaptive.minDepthPct && mid < r.adaptive.maxDepthPct, `mid ${mid}`);
+  const pumped = [...wiggle(40, 0.002, 1), ...wiggle(10, 0.002, 2.5)];
+  assert.ok(pumpPct(pumped) >= 100);
+  // The pump itself raises ATR too; the boost comes on top of that.
+  const noBoost = chooseDepth(pumped, { ...r, adaptive: { ...r.adaptive, pumpBoostPct: 0 } }).depthPct;
+  assert.equal(chooseDepth(pumped, r).depthPct, Math.min(r.adaptive.capDepthPct, noBoost + r.adaptive.pumpBoostPct));
+  assert.equal(chooseDepth([], r).depthPct, r.adaptive.maxDepthPct);
+  assert.equal(chooseDepth(wiggle(40, 0.06), { ...r, mode: "fixed", targetDownsidePct: 70 }).depthPct, 70);
+  const huge = [...wiggle(40, 0.06, 1), ...wiggle(10, 0.06, 3)];
+  assert.ok(chooseDepth(huge, r).depthPct <= r.adaptive.capDepthPct);
+});
+
+test("expected-fee score: high bin step beats a higher fee/TVL on a low bin step for a deep range", () => {
+  const p = (addr, step, ratio) => ({ pool_address: addr, dlmm_params: { bin_step: step }, fee_active_tvl_ratio_1h: ratio, tvl: 10_000 });
+  const lowStep = p("a", 80, 1.0);    // 85% needs ~238 bins
+  const highStep = p("b", 250, 0.6);  // 85% needs ~77 bins
+  assert.ok(expectedFeeScore(highStep, 85) > expectedFeeScore(lowStep, 85));
+  assert.equal(rankByExpectedFee([lowStep, highStep], 85)[0].pool_address, "b");
+  // Much higher fee/TVL still wins
+  assert.equal(rankByExpectedFee([p("c", 80, 5), p("d", 250, 0.6)], 85)[0].pool_address, "c");
+  assert.equal(expectedFeeScore(p("e", 100, null), 85), 0);
+});

@@ -78,7 +78,10 @@ async function main() {
         const c = config.evilpanda.chart;
         const pool = c.source === 'dlmm_pool' && screened.pool ? screened.pool.pool_address : await src.chartPoolFor(mint, c.requestDelayMs);
         const ks = await src.candles(pool, { mint, aggregate: c.timeframeMin, limit: c.candles, currency: c.currency, delayMs: c.requestDelayMs });
-        chart = { chartPool: pool, candlesSinceBreakUp: candlesSinceBreakUp(ks, c), latest: snapshot(ks, c) };
+        const { chooseDepth, rankByExpectedFee } = await import('./evilpanda/adaptive.js');
+        const depth = chooseDepth(ks, config.evilpanda.range);
+        const ranked = screened.pools ? rankByExpectedFee(screened.pools, depth.depthPct).map(p => ({ pool: p.pool_address, binStep: p.dlmm_params?.bin_step, feeTvl1h: p.fee_active_tvl_ratio_1h, score: p._score })) : [];
+        chart = { chartPool: pool, candlesSinceBreakUp: candlesSinceBreakUp(ks, c), latest: snapshot(ks, c), range: depth, poolsByExpectedFee: ranked };
       } catch (e) { chart = { error: e.message }; }
       return out({ pass: screened.pass, reason: screened.reason, pool: screened.pool?.pool_address ?? null, binStep: screened.pool?.dlmm_params?.bin_step ?? null, rugcheckScore: screened.rugcheck?.score_normalised ?? null, gmgn: screened.gmgn ?? null, chart });
     }

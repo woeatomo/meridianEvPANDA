@@ -28,6 +28,7 @@ import { rejectTokenBasics, rejectRugcheck, rejectGmgnFetch, rejectPool, rankPoo
 import { fastExitDecision, candleExitDecision, updateOor, narrativeProxyHealthy } from "./exits.js";
 import { entryVeto, lowYieldVeto } from "./llm.js";
 import { binsForDownsidePct } from "./range.js";
+import { chooseDepth, rankByExpectedFee } from "./adaptive.js";
 import * as paper from "./paper.js";
 
 const STATE_FILE = repoPath("evilpanda-state.json");
@@ -119,13 +120,31 @@ export async function screenCandidate(mint) {
       const p = await src.discoveryPool(address, "24h");
       const vol30 = await src.discoveryPool(address, "30m").catch(() => null);
       if (vol30?.volatility != null) p.volatility = vol30.volatility;
+      // 1h fee/active-TVL: steadier than 5m/30m and the input for the expected-fee ranking.
+      const h1 = await src.discoveryPool(address, "1h").catch(() => null);
+      p.fee_active_tvl_ratio_1h = h1?.fee_active_tvl_ratio ?? null;
       const why = rejectPool(p, mint, config.tokens.SOL, config.screening);
       if (why) rejected.push(why); else eligible.push(p);
     } catch (err) { rejected.push(err.message); }
   }
   if (!eligible.length) return { pass: false, reason: rejected.slice(0, 2).join("; ") || "no eligible token/SOL DLMM pool" };
-  const pool = rankPools(eligible, e.pool.preferHighBinStep)[0];
-  return { pass: true, reason: "ok", token, pool, rugcheck, gmgn };
+  // Provisional ranking with the deepest adaptive range; re-ranked at entry with the real depth.
+  const provisionalDepth = e.range.mode === "adaptive" ? e.range.adaptive.maxDepthPct : e.range.targetDownsidePct;
+  const ranked = rankPoolsFor(eligible, provisionalDepth);
+  return { pass: true, reason: "ok", token, pool: ranked[0], pools: ranked, rugcheck, gmgn };
+}
+
+function rankPoolsFor(pools, depthPct) {
+  return ep().pool.ranking === "expected_fee" ? rankByExpectedFee(pools, depthPct) : rankPools(pools, ep().pool.preferHighBinStep);
+}
+
+/** Compact pool record kept in the watchlist. */
+function poolRecord(p) {
+  return {
+    pool_address: p.pool_address, dlmm_params: { bin_step: p.dlmm_params?.bin_step }, tvl: p.tvl,
+    fee_active_tvl_ratio: p.fee_active_tvl_ratio, fee_active_tvl_ratio_1h: p.fee_active_tvl_ratio_1h,
+    volatility: p.volatility, pool_price: p.pool_price,
+  };
 }
 
 async function rescreenDue() {
@@ -140,6 +159,7 @@ async function rescreenDue() {
         volatility: r.pool?.volatility ?? null, poolPrice: r.pool?.pool_price ?? null,
         tokenFacts: r.token ? { symbol: r.token.symbol, name: r.token.name, mcap: r.token.mcap, createdAt: r.token.createdAt, holders: r.token.holderCount } : null,
         rugcheckScore: r.rugcheck?.score_normalised ?? null, gmgn: r.gmgn ?? null,
+        pools: r.pools ? r.pools.map(poolRecord) : [],
         shapeInput: r.pass ? { token: { createdAt: r.token.createdAt, mcap: r.token.mcap }, pool: { volatility: r.pool.volatility }, rugcheck: r.rugcheck ? { score_normalised: r.rugcheck.score_normalised } : null, gmgn: r.gmgn } : null,
       });
       if (r.terminal) delete state.watchlist[w.mint];
@@ -234,8 +254,15 @@ async function tryEntries() {
       const since = candlesSinceBreakUp(ks, ep().chart);
       if (!snap || snap.stDirection !== "up" || since == null || since >= ep().entry.freshBreakCandles) continue;
       log("ep_entry", `${w.mint.slice(0, 8)} broke above Supertrend (close ${snap.close} > ST ${snap.supertrend.toFixed(10)})`);
+      // Range depth from this token's volatility, then the pool that pays OUR position best at that depth.
+      const depth = chooseDepth(ks, ep().range);
+      const best = rankPoolsFor(w.pools?.length ? w.pools : [], depth.depthPct)[0];
+      if (best) {
+        Object.assign(w, { poolAddress: best.pool_address, binStep: best.dlmm_params?.bin_step, volatility: best.volatility, poolPrice: best.pool_price });
+      }
+      log("ep_entry", `${w.mint.slice(0, 8)} range -${depth.depthPct}% (${depth.reason}) → pool ${String(w.poolAddress).slice(0, 8)} bin step ${w.binStep}${best?._score != null ? `, fee score ${best._score.toExponential(2)}` : ""}`);
       try {
-        if (await attemptEntry(w, snap)) open++;
+        if (await attemptEntry(w, snap, depth)) open++;
       } catch (err) {
         log("ep_entry", `${w.mint.slice(0, 8)} entry error: ${err.message}`);
       }
@@ -245,7 +272,8 @@ async function tryEntries() {
   }
 }
 
-async function attemptEntry(w, snap) {
+async function attemptEntry(w, snap, depth) {
+  const depthPct = depth?.depthPct ?? ep().range.targetDownsidePct;
   const e = ep();
   const veto = await entryVeto(e.llm, {
     ...w.tokenFacts, narrative: await src.jupiterNarrative(w.mint), sources: w.sources,
@@ -277,10 +305,10 @@ async function attemptEntry(w, snap) {
     base_mint: w.mint,
     amount_y: amountY,
     strategy: shape.strategy,
-    downside_pct: e.range.targetDownsidePct,
+    downside_pct: depthPct,
     upside_pct: 0,
     shrink_to_initialized: e.range.shrinkToInitialized,
-    min_downside_pct: e.range.minDownsidePct,
+    min_downside_pct: Math.min(e.range.minDownsidePct, depthPct),
     volatility: w.volatility,
     bin_step: w.binStep,
     pool_name: w.tokenFacts?.symbol ? `${w.tokenFacts.symbol}-SOL` : undefined,
@@ -313,7 +341,7 @@ async function attemptEntry(w, snap) {
     const pp = paper.openPaper({
       mint: w.mint, pool: w.poolAddress, symbol: w.tokenFacts?.symbol, entryPrice: basePrice,
       binStep: Number(result.would_deploy?.bin_step ?? w.binStep),
-      binsBelow: Number(result.would_deploy?.bins_below ?? binsForDownsidePct(e.range.targetDownsidePct, w.binStep)),
+      binsBelow: Number(result.would_deploy?.bins_below ?? binsForDownsidePct(depthPct, w.binStep)),
       shape: shape.strategy, capitalSol: amountY, sources: w.sources,
     });
     rec.position = pp.id;
@@ -327,7 +355,7 @@ async function attemptEntry(w, snap) {
   const range = result.would_deploy ? ` bins_below=${result.would_deploy.bins_below}${result.would_deploy.range_shrunk ? " (shrunk, rent-free)" : ""}` : "";
   const label = result.dry_run ? "[SHADOW] would deploy" : "Deployed";
   log("ep_entry", `${label} ${amountY} SOL ${shape.strategy} → ${w.poolAddress.slice(0, 8)} (${w.mint.slice(0, 8)}, via ${w.sources.join("+")})${range} — shape: ${shape.reason}; llm: ${veto.reason}`);
-  void notify(`${result.dry_run ? "🕯️ Shadow" : "✅ Entry"} ${w.tokenFacts?.symbol ?? w.mint.slice(0, 8)}: ${amountY} SOL ${shape.strategy}, -${e.range.targetDownsidePct}% target (${w.sources.join("+")})`);
+  void notify(`${result.dry_run ? "🕯️ Shadow" : "✅ Entry"} ${w.tokenFacts?.symbol ?? w.mint.slice(0, 8)}: ${amountY} SOL ${shape.strategy}, range -${depthPct}%${depth?.reason ? ` (${depth.reason})` : ""} (${w.sources.join("+")})`);
   return true;
 }
 
@@ -544,7 +572,7 @@ export function startEngine({ monitorStore, notifyFn }) {
   };
   void rescreen();
   timers.rescreen = setInterval(() => void rescreen(), 2 * 60_000);
-  log("ep", `EvilPanda engine started — sources: ${Object.entries(e.sources).filter(([, v]) => v).map(([k]) => k).join(", ")} | range -${e.range.targetDownsidePct}% (min -${e.range.minDownsidePct}%, rent-free=${e.range.shrinkToInitialized}) | shape ${e.shape.default}${e.shape.autoSpot ? "/auto-spot" : ""} | paper ${paperOn() ? "on" : "off"} | LLM ${e.llm.enabled ? e.llm.model : "off"} | GMGN ${e.gmgn.apiKey ? "on" : "no key → skipped"}`);
+  log("ep", `EvilPanda engine started — sources: ${Object.entries(e.sources).filter(([, v]) => v).map(([k]) => k).join(", ")} | range ${e.range.mode === "adaptive" ? `adaptive -${e.range.adaptive.minDepthPct}…-${e.range.adaptive.maxDepthPct}% (ATR ${e.range.adaptive.atrLowPct}–${e.range.adaptive.atrHighPct}%)` : `-${e.range.targetDownsidePct}%`} (min -${e.range.minDownsidePct}%, rent-free=${e.range.shrinkToInitialized}) | pools ${e.pool.ranking} | shape ${e.shape.default}${e.shape.autoSpot ? "/auto-spot" : ""} | paper ${paperOn() ? "on" : "off"} | LLM ${e.llm.enabled ? e.llm.model : "off"} | GMGN ${e.gmgn.apiKey ? "on" : "no key → skipped"}`);
 }
 
 export function stopEngine() {

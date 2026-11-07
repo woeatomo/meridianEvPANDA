@@ -244,11 +244,26 @@ export function buildEvilPandaConfig(e = {}) {
     maxWatchlist: 40,
   });
   const range = pick(e.range, {
-    targetDownsidePct: 85,      // 0% to -85%
+    mode: "adaptive",           // adaptive (depth from 15m ATR%) | fixed (targetDownsidePct)
+    targetDownsidePct: 85,      // fixed mode: 0% to -85%
     minDownsidePct: 50,         // shallower than this after shrinking → skip the pool
     shrinkToInitialized: true,  // never pay non-refundable bin-array rent
   });
-  const pool = pick(e.pool, { preferHighBinStep: true });
+  range.adaptive = pick(e.range?.adaptive, {
+    minDepthPct: 50,            // calm tokens
+    maxDepthPct: 85,            // wild tokens
+    capDepthPct: 90,            // hard cap including the pump boost
+    atrPeriod: 14,
+    atrLowPct: 2,               // ATR% (15m) at/below this → minDepthPct   ← calibrate from the backtest report
+    atrHighPct: 8,              // ATR% (15m) at/above this → maxDepthPct   ← calibrate from the backtest report
+    pumpLookbackCandles: 96,    // 24h of 15m candles
+    pumpThresholdPct: 100,      // price ≥ 2× its 24h low …
+    pumpBoostPct: 10,           // … → range 10% deeper ("after a big pump, use a bigger pool")
+  });
+  const pool = pick(e.pool, {
+    ranking: "expected_fee",    // expected_fee (fee/active-TVL 1h ÷ bins needed) | bin_step (highest bin step first)
+    preferHighBinStep: true,    // used by ranking "bin_step"
+  });
   const shape = pick(e.shape, { default: "bid_ask", autoSpot: true });
   shape.spot = pick(e.shape?.spot, {
     minAgeHours: 72,
