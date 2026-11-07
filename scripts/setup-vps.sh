@@ -27,10 +27,15 @@ if ! command -v pm2 >/dev/null 2>&1; then
 fi
 
 # Firewall: the bot needs no inbound ports
-if command -v ufw >/dev/null 2>&1 && ! sudo ufw status | grep -q "Status: active"; then
+# Optional: never let a firewall problem stop the setup.
+if command -v ufw >/dev/null 2>&1 && ! sudo ufw status 2>/dev/null | grep -q "Status: active"; then
   echo "== Enabling firewall (SSH only)"
-  sudo ufw allow OpenSSH
-  sudo ufw --force enable
+  SSH_PORT=$(sudo sshd -T 2>/dev/null | awk '/^port /{print $2; exit}')
+  sudo ufw allow "${SSH_PORT:-22}/tcp" || true
+  sudo ufw allow OpenSSH >/dev/null 2>&1 || true
+  if sudo ufw --force enable; then echo "   firewall on (SSH port ${SSH_PORT:-22} allowed)"; else echo "!! firewall could not be enabled — continuing without it"; fi
+else
+  echo "== Firewall already active or ufw not installed — skipped"
 fi
 
 echo "== Installing dependencies"
