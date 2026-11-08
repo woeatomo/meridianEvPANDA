@@ -112,7 +112,9 @@ function loadTargets() {
       if (!mint) continue;
       const t0 = Date.parse(p.deployed_at || p.recorded_at);
       const t1 = Date.parse(p.recorded_at || p.deployed_at);
-      const e = byMint.get(mint) ?? { mint, pools: new Set(), name: p.pool_name, binStep: p.bin_step, entryTvl: p.entry_tvl, from: Infinity, to: 0, old: [] };
+      const e = byMint.get(mint) ?? { mint, pools: new Set(), name: p.pool_name, binStep: p.bin_step, tvls: [], from: Infinity, to: 0, old: [] };
+      if (Number(p.entry_tvl) > 0) e.tvls.push(Number(p.entry_tvl));
+      if (Number(p.initial_value_usd) > 0 && Number(p.minutes_held) > 0) e.feeYieldsPerHour = [...(e.feeYieldsPerHour ?? []), (Number(p.fees_earned_usd) || 0) / Number(p.initial_value_usd) * 100 / (Number(p.minutes_held) / 60)];
       if (p.pool) e.pools.add(p.pool);
       if (Number.isFinite(t0)) e.from = Math.min(e.from, t0);
       if (Number.isFinite(t1)) e.to = Math.max(e.to, t1);
@@ -122,6 +124,8 @@ function loadTargets() {
     return [...byMint.values()].map(e => ({
       ...e,
       pools: [...e.pools],
+      // TVL the pool really had back then (from the old bot), instead of today's — dead pools have ~0 TVL now.
+      entryTvl: e.tvls.length ? e.tvls.sort((a, b) => a - b)[Math.floor(e.tvls.length / 2)] : null,
       // Warm-up before the first old entry, and room after the last exit.
       from: (Number.isFinite(e.from) ? e.from : now - days * DAY) - 2 * DAY,
       evalFrom: Number.isFinite(e.from) ? e.from - 12 * 3_600_000 : now - days * DAY,
@@ -165,6 +169,7 @@ const base = {
   shape: { ...ep.shape },
   chart: { ...ep.chart },
   costs: { txSol: 0.003, swapSlippagePct: 1 },
+  feeModel: { maxShare: 0.1 },
 };
 const VARIANTS = {
   "config-kamu": base,
@@ -174,6 +179,8 @@ const VARIANTS = {
   "range-50-tetap": { ...base, range: { ...base.range, mode: "fixed", targetDownsidePct: 50 } },
   "spot": { ...base, shape: { ...base.shape, default: "spot" } },
   "oor-atas-min1%": { ...base, exits: { ...base.exits, oorAboveMinPnlPct: 1 } },
+  "low-yield-6jam": { ...base, exits: { ...base.exits, lowYieldMinAgeMinutes: 360 } },
+  "tanpa-low-yield": { ...base, exits: { ...base.exits, lowYieldMinFeePerTvl24h: null } },
 };
 const FEE_SCENARIOS = { rendah: 0.5, sedang: 1, tinggi: 2 };
 
@@ -224,10 +231,12 @@ for (const [n, t] of targets.entries()) {
     }).filter(k => k.solUsd > 0);
     if (candles.length < 80) { console.log(`${label} skipped: only ${candles.length} candles (pool ${pool.address.slice(0, 8)}: ${raw.length} raw, SOL: ${sol.length}) — run with --debug to see the API calls`); perToken.push({ mint: t.mint, name: pool.name, skipped: "not enough candles" }); continue; }
     const startIndex = Math.max(60, candles.findIndex(k => k.t >= t.evalFrom));
-    const row = { mint: t.mint, name: pool.name, binStep: pool.binStep, feePct: pool.feePct, assumedPool: pool.assumed, candles: candles.length, old: t.old };
+    // Historical TVL beats today's (a dead pool's TVL now is ~0 and would hand us all its old fees).
+    const simPool = { ...pool, activeTvlUsd: t.entryTvl ?? pool.activeTvlUsd };
+    const row = { mint: t.mint, name: pool.name, tvlUsed: simPool.activeTvlUsd, tvlSource: t.entryTvl ? "lessons" : "today", binStep: pool.binStep, feePct: pool.feePct, assumedPool: pool.assumed, candles: candles.length, old: t.old };
     for (const [vName, cfg] of Object.entries(VARIANTS)) {
       for (const [fName, mult] of Object.entries(FEE_SCENARIOS)) {
-        const trades = simulateMint({ candles, pool, cfg, feeMult: mult, startIndex }).map(tr => ({ ...tr, mint: t.mint, name: pool.name }));
+        const trades = simulateMint({ candles, pool: simPool, cfg, feeMult: mult, startIndex }).map(tr => ({ ...tr, mint: t.mint, name: pool.name }));
         results[vName][fName].push(...trades);
         if (vName === "config-kamu" && fName === "sedang") row.trades = trades;
       }
@@ -252,6 +261,18 @@ lines.push("| Varian | Fee | Trades | Win % | Avg | Median | Terburuk | Terbaik 
 for (const [v, byFee] of Object.entries(results)) for (const [fName, trades] of Object.entries(byFee)) {
   const s = summarize(trades);
   lines.push(`| ${v} | ${fName} | ${s.trades} | ${f(s.winRatePct, 0)} | ${f(s.avgPnlPct)} | ${f(s.medianPnlPct)} | ${f(s.worstPnlPct)} | ${f(s.bestPnlPct)} | ${f(s.avgFeesPct)} | ${f((s.avgHeldMin ?? NaN) / 60, 1)} |`);
+}
+// Fee model sanity check against what the old bot really earned.
+{
+  const model = results["config-kamu"].sedang.filter(t => t.heldMin > 0).map(t => t.feesPct / (t.heldMin / 60)).sort((a, b) => a - b);
+  const real = targets.flatMap(t => t.feeYieldsPerHour ?? []).sort((a, b) => a - b);
+  const q = (a, x) => (a.length ? a[Math.min(a.length - 1, Math.floor(x * a.length))] : NaN);
+  const mean = a => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : NaN);
+  lines.push("", "## Kalibrasi fee (% modal per jam)", "",
+    "| | Median | Rata-rata | p90 |", "|---|---|---|---|",
+    `| Model backtest (config-kamu, sedang) | ${f(q(model, 0.5), 3)} | ${f(mean(model), 3)} | ${f(q(model, 0.9), 3)} |`,
+    `| Bot lama (asli, dari lessons.json) | ${real.length ? f(q(real, 0.5), 3) : "-"} | ${real.length ? f(mean(real), 3) : "-"} | ${real.length ? f(q(real, 0.9), 3) : "-"} |`, "",
+    "Range bot lama lebih sempit (lebih padat per bin), jadi fee aslinya wajar sedikit lebih tinggi per jam. Kalau model jauh di atas bot lama, angka fee backtest terlalu optimis.");
 }
 lines.push("", "## Alasan exit (config-kamu, fee sedang)", "", "| Rule | Jumlah | Avg PnL % |", "|---|---|---|");
 for (const [rule, r] of Object.entries(summarize(results["config-kamu"].sedang).byRule ?? {})) lines.push(`| ${rule} | ${r.n} | ${f(r.avgPnl)} |`);
@@ -282,7 +303,7 @@ for (const r of perToken) {
 lines.push("", "\\* pool data not available any more; bin step from lessons.json, fee assumed 1%.", "");
 lines.push("## Batasan", "",
   "- Filter Rugcheck/GMGN/holders tidak bisa di-backtest (tidak ada data historis). Semua token dianggap lolos screening.",
-  "- Fee adalah perkiraan: volume pool × fee dasar × porsi likuiditas kita di sekitar harga, dengan active TVL hari ini. Skenario rendah/tinggi = ×0.5/×2. Dynamic fee diabaikan.",
+  "- Fee adalah perkiraan: volume pool × fee dasar × porsi likuiditas kita di sekitar harga. TVL pakai entry_tvl historis dari lessons.json (fallback: TVL hari ini), porsi kita dibatasi maks 10%. Skenario rendah/tinggi = ×0.5/×2. Dynamic fee diabaikan.",
   "- Range penuh diasumsikan (biaya bin-array tidak diketahui historis); live bot bisa memendekkan range.",
   "- Pemilihan pool (skor fee/TVL ÷ jumlah bin) tidak bisa di-backtest: hanya satu pool per token yang disimulasikan. Uji lewat paper trading.",
   "- Batas 3 posisi bersamaan tidak disimulasikan; tiap token dihitung sendiri.",

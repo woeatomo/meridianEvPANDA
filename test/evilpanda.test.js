@@ -326,8 +326,9 @@ test("ATR%: calm series small, wild series large", () => {
 });
 
 test("adaptive depth: calm → min, wild → max, in-between interpolates, pump adds the boost, unknown → max", () => {
-  const r = ep.range;
-  assert.equal(r.mode, "adaptive");
+  assert.equal(ep.range.mode, "adaptive");
+  // Fixed thresholds so the test doesn't depend on the calibrated defaults.
+  const r = { ...ep.range, adaptive: { ...ep.range.adaptive, atrLowPct: 2, atrHighPct: 8 } };
   assert.equal(chooseDepth(wiggle(40, 0.002), r).depthPct, r.adaptive.minDepthPct);
   assert.equal(chooseDepth(wiggle(40, 0.06), r).depthPct, r.adaptive.maxDepthPct);
   const mid = chooseDepth(wiggle(40, 0.025), r).depthPct;

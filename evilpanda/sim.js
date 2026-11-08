@@ -65,7 +65,7 @@ export function liquidityNearPrice(bins, binStep, price, spanBins = 3) {
  * @param {number} ourNearSol    liquidityNearPrice(...)
  * @param {number} activeTvlSol  pool liquidity around the active price (SOL)
  */
-export function feeEstimate(poolFeesSol, ourNearSol, activeTvlSol) {
+export function feeEstimate(poolFeesSol, ourNearSol, activeTvlSol, maxShare = 1) {
   if (!(poolFeesSol > 0) || !(ourNearSol > 0) || !(activeTvlSol > 0)) return 0;
-  return poolFeesSol * ourNearSol / (activeTvlSol + ourNearSol);
+  return poolFeesSol * Math.min(maxShare, ourNearSol / (activeTvlSol + ourNearSol));
 }

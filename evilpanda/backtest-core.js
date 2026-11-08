@@ -103,7 +103,8 @@ export function simulateMint({ candles, pool, cfg, feeMult = 1, startIndex = 0 }
       if (idx >= 0 && idx < pos.bins.length) {
         const poolFeesSol = k.vUsd * pool.feePct / 100 / k.solUsd;
         const near = liquidityNearPrice(pos.bins, pool.binStep, k.c, 3);
-        fee = feeEstimate(poolFeesSol, near, pool.activeTvlUsd / k.solUsd) * feeMult;
+        // Share is capped: other LPs pile into an active pool, so we never own most of its fees.
+        fee = feeEstimate(poolFeesSol, near, pool.activeTvlUsd / k.solUsd, cfg.feeModel?.maxShare ?? 0.1) * feeMult;
       }
       pos.fees += fee;
       pos.feeLog.push(fee);

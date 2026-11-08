@@ -254,8 +254,8 @@ export function buildEvilPandaConfig(e = {}) {
     maxDepthPct: 85,            // wild tokens
     capDepthPct: 90,            // hard cap including the pump boost
     atrPeriod: 14,
-    atrLowPct: 2,               // ATR% (15m) at/below this → minDepthPct   ← calibrate from the backtest report
-    atrHighPct: 8,              // ATR% (15m) at/above this → maxDepthPct   ← calibrate from the backtest report
+    atrLowPct: 3,               // ATR% (15m) at/below this → minDepthPct   (p25 of entries in the 2026-11 backtest)
+    atrHighPct: 7,              // ATR% (15m) at/above this → maxDepthPct   (p75 of entries in the 2026-11 backtest)
     pumpLookbackCandles: 96,    // 24h of 15m candles
     pumpThresholdPct: 100,      // price ≥ 2× its 24h low …
     pumpBoostPct: 10,           // … → range 10% deeper ("after a big pump, use a bigger pool")

@@ -115,8 +115,8 @@
         "maxDepthPct": 85,
         "capDepthPct": 90,
         "atrPeriod": 14,
-        "atrLowPct": 2,
-        "atrHighPct": 8,
+        "atrLowPct": 3,
+        "atrHighPct": 7,
         "pumpLookbackCandles": 96,
         "pumpThresholdPct": 100,
         "pumpBoostPct": 10
