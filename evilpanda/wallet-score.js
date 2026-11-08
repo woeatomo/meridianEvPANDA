@@ -50,6 +50,8 @@ export function qualifyWallet(m, c) {
   if (m.poolsTraded < c.minPoolsTraded) return `traded ${m.poolsTraded} pool(s) (< ${c.minPoolsTraded})`;
   if (!(m.winRatePct >= c.minWinRatePct)) return `win rate ${m.winRatePct?.toFixed(0) ?? "?"}% (< ${c.minWinRatePct}%)`;
   if (!(m.totalPnlSol > c.minTotalPnlSol)) return `total PnL ${m.totalPnlSol.toFixed(3)} SOL (≤ ${c.minTotalPnlSol})`;
+  // Market-making bots win almost every trade by a hair; their deposits are rebalances, not picks.
+  if (c.minMedianPnlPct != null && !(m.medianPnlPct >= c.minMedianPnlPct)) return `bot-like: median PnL ${m.medianPnlPct?.toFixed(2) ?? "?"}% per position (< ${c.minMedianPnlPct}%)`;
   if (m.avgDepositUsd == null) return "position size unknown";
   if (m.avgDepositUsd < c.minAvgDepositUsd) return `avg size $${m.avgDepositUsd.toFixed(0)} (< $${c.minAvgDepositUsd})`;
   if (m.avgDepositUsd > c.maxAvgDepositUsd) return `avg size $${m.avgDepositUsd.toFixed(0)} (> $${c.maxAvgDepositUsd}, whale)`;

@@ -291,16 +291,28 @@ export function buildEvilPandaConfig(e = {}) {
   const walletFinder = pick(e.walletFinder, {
     pools: 15,                  // busiest token/SOL DLMM pools to scan
     minPoolVolume: 50_000,      // 24h pool volume floor for scanned pools
-    maxWallets: 80,             // wallets to score (each costs pools × 1–2 API calls)
-    minClosed: 5,               // closed positions in the scanned pools
+    maxWallets: 80,             // wallets to score per run (each costs pools × 1–2 API calls)
+    minClosed: 30,              // closed positions in the scanned pools
     maxClosed: 400,             // more than this looks like a bot / vault
     minPoolsTraded: 2,
-    minWinRatePct: 55,
+    minWinRatePct: 70,
     minTotalPnlSol: 0,
+    minMedianPnlPct: 0.35,      // below this the wallet looks like a market-making bot
     minAvgDepositUsd: 30,
     maxAvgDepositUsd: 20_000,
-    maxWorstPnlPct: -60,        // skip wallets that rode a position into the ground
+    maxWorstPnlPct: -30,        // skip wallets that rode a position deep into a loss
     requestDelayMs: 120,        // Meteora API limit is 30 req/s
+  });
+  walletFinder.auto = pick(e.walletFinder?.auto, {
+    enabled: true,              // daemon re-scans and manages the list on its own
+    intervalHours: 24,
+    maxWallets: 15,             // list size cap (all categories)
+    addPerRun: 3,               // grow the list gradually
+    removeMinClosed: 10,        // fresh closed positions needed before judging performance
+    inactiveDays: 3,            // no open DLMM position anywhere for this long → remove
+    readdCooldownDays: 14,      // a removed wallet can't come back for this long
+    // Category "pinned" is never removed: /removewallet + /addwallet with name, then edit
+    // smart-wallets.json and set "category": "pinned" for wallets you always want.
   });
   const paper = pick(e.paper, {
     enabled: true,              // only active in shadow mode: every "would deploy" becomes a simulated position

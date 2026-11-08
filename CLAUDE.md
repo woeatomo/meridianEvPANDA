@@ -21,7 +21,8 @@ The app is the standalone bot with the EvilPanda strategy layer (`evilpanda/`). 
 - `exit-rules.js`, `state.js`: deterministic rules and position tracking.
 - `performance.js`: local performance accounting and pool cooldown updates. Uses the existing `lessons.json` schema, preserving historical data.
 - `pool-memory.js`, `token-blacklist.js`, `dev-blocklist.js`: local history and safety filters.
-- `smart-wallets.js`: local LP watchlist CRUD.
+- `smart-wallets.js`: local LP watchlist CRUD. The monitor re-reads it on every reconcile, so edits apply without a restart.
+- `wallet-finder/finder.js` + `evilpanda/wallet-score.js`, `wallet-manage.js`: smart-wallet discovery and the daily automatic add/remove job (category "pinned" is never removed).
 - `telegram.js`: outbound notifications only.
 
 ## Invariants

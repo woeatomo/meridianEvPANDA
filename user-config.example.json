@@ -149,6 +149,14 @@
       "minVolumeRatio": 0.5
     },
     "paper": { "enabled": true, "pollSec": 60, "nearSpanBins": 3 },
+    "walletFinder": {
+      "pools": 15,
+      "minClosed": 30,
+      "minWinRatePct": 70,
+      "minMedianPnlPct": 0.35,
+      "maxWorstPnlPct": -30,
+      "auto": { "enabled": true, "intervalHours": 24, "maxWallets": 15, "addPerRun": 3, "inactiveDays": 3, "readdCooldownDays": 14 }
+    },
     "llm": {
       "enabled": false,
       "baseUrl": "https://openrouter.ai/api/v1",

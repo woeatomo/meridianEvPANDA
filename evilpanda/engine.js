@@ -562,6 +562,16 @@ export function startEngine({ monitorStore, notifyFn }) {
     timers.discord = setInterval(() => void runDiscord(), Math.max(15, e.discord.pollSec) * 1000);
   }
   scheduleCandles();
+  if (e.sources.smartWallet && e.walletFinder.auto.enabled) {
+    // Daily smart-wallet scan: adds good LPers, removes ones that turned bad or went idle.
+    // The monitor re-reads smart-wallets.json on its own, so no restart is needed.
+    const walletJob = async () => {
+      try { const { dailyWalletJob } = await import("../wallet-finder/finder.js"); await dailyWalletJob(notify); }
+      catch (err) { log("wallet_finder", `job error: ${err.message}`); }
+    };
+    timers.walletFinderFirst = setTimeout(() => void walletJob(), 3 * 60_000);
+    timers.walletFinder = setInterval(() => void walletJob(), 60 * 60_000);
+  }
   if (paperOn()) {
     void paperTick();
     timers.paper = setInterval(() => void paperTick(), Math.max(15, ep().paper.pollSec) * 1000);

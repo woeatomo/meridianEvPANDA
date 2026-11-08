@@ -415,7 +415,7 @@ test("wallet metrics aggregate closed positions across pools", () => {
 });
 
 test("wallet qualification rejects small samples, bots, whales, losers and blow-ups", () => {
-  const c = buildEvilPandaConfig({}).walletFinder;
+  const c = { ...buildEvilPandaConfig({}).walletFinder, minClosed: 5, minWinRatePct: 55, maxWorstPnlPct: -60, minMedianPnlPct: 0.35 };
   const good = walletMetrics([{ pool: "a", positions: [closedPos(0.1, 5), closedPos(0.1, 4), closedPos(-0.02, -2)] }, { pool: "b", positions: [closedPos(0.1, 6), closedPos(0.05, 3), closedPos(0.02, 1)] }]);
   assert.equal(qualifyWallet(good, c), null);
   assert.match(qualifyWallet({ ...good, closed: 3 }, c), /closed/);
@@ -432,4 +432,38 @@ test("wallet ranking: a consistent 40-trade wallet beats a lucky 5/5 wallet", ()
   const steady = { closed: 40, winRatePct: 75, totalPnlSol: 0.5 };
   assert.ok(walletScore(steady) > walletScore(lucky));
   assert.equal(rankWallets([{ wallet: "lucky", metrics: lucky }, { wallet: "steady", metrics: steady }])[0].wallet, "steady");
+});
+
+test("bot filter: tiny median PnL per position is rejected even with a 94% win rate", () => {
+  const c = buildEvilPandaConfig({}).walletFinder;
+  const bot = { closed: 118, poolsTraded: 11, winRatePct: 94, totalPnlSol: 14.4, medianPnlPct: 0.02, worstPnlPct: -0.07, avgDepositUsd: 6957 };
+  assert.match(qualifyWallet(bot, c), /bot-like/);
+  assert.equal(qualifyWallet({ ...bot, medianPnlPct: 0.56, worstPnlPct: -6 }, c), null);
+});
+
+import { removalReason, walletsToAdd } from "../evilpanda/wallet-manage.js";
+
+test("auto manage: remove on bad performance or inactivity, never pinned, add best first within caps", () => {
+  const c = { ...buildEvilPandaConfig({}).walletFinder, ...buildEvilPandaConfig({}).walletFinder.auto };
+  const now = Date.parse("2026-11-20T00:00:00Z");
+  const old = { address: "A", category: "alpha", addedAt: "2026-11-01T00:00:00Z" };
+  const good = { closed: 40, poolsTraded: 5, winRatePct: 78, totalPnlSol: 2, medianPnlPct: 0.8, worstPnlPct: -10, avgDepositUsd: 200 };
+  assert.equal(removalReason(old, { metrics: good, activeNow: true, state: {} }, c, now), null);
+  assert.match(removalReason(old, { metrics: { ...good, totalPnlSol: -0.5 }, activeNow: true, state: {} }, c, now), /performance/);
+  assert.match(removalReason(old, { metrics: { ...good, medianPnlPct: 0.01 }, activeNow: true, state: {} }, c, now), /bot-like/);
+  assert.equal(removalReason(old, { metrics: { ...good, closed: 4, totalPnlSol: -1 }, activeNow: true, state: {} }, c, now), null, "too little fresh data to judge");
+  assert.match(removalReason(old, { metrics: null, activeNow: false, state: { lastActiveAt: now - 4 * 86_400_000 } }, c, now), /inactive/);
+  assert.equal(removalReason(old, { metrics: null, activeNow: false, state: { lastActiveAt: now - 86_400_000 } }, c, now), null);
+  assert.equal(removalReason({ ...old, category: "pinned" }, { metrics: { ...good, totalPnlSol: -9 }, activeNow: false, state: {} }, c, now), null);
+
+  const rows = [
+    { wallet: "X", metrics: { ...good, closed: 60 } },
+    { wallet: "Y", metrics: { ...good, closed: 35, winRatePct: 72 } },
+    { wallet: "Z", metrics: good },
+    { wallet: "W", metrics: good },
+  ];
+  const picked = walletsToAdd(rows, new Set(["A"]), { Z: now + 1000 }, { ...c, addPerRun: 2, maxWallets: 15 }, now);
+  assert.equal(picked.length, 2);
+  assert.ok(!picked.some(r => r.wallet === "Z"), "removed wallets stay out during cooldown");
+  assert.equal(walletsToAdd(rows, new Set(Array.from({ length: 15 }, (_, i) => `w${i}`)), {}, c, now).length, 0, "list full");
 });

@@ -57,3 +57,4 @@ evilpanda-paper.json
 backtest/cache/
 backtest/results/
 wallet-finder/results/
+wallet-finder/state.json
