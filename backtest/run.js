@@ -21,7 +21,7 @@ import { fileURLToPath } from "node:url";
 import { config } from "../config.js";
 import { getJson, poolsForMint, discoveryPool } from "../evilpanda/sources.js";
 import { rankPools } from "../evilpanda/filters.js";
-import { simulateMint, summarize } from "../evilpanda/backtest-core.js";
+import { simulateMint, summarize, modelFeesForPosition } from "../evilpanda/backtest-core.js";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const GECKO = "https://api.geckoterminal.com/api/v2/networks/solana";
@@ -118,7 +118,17 @@ function loadTargets() {
       if (p.pool) e.pools.add(p.pool);
       if (Number.isFinite(t0)) e.from = Math.min(e.from, t0);
       if (Number.isFinite(t1)) e.to = Math.max(e.to, t1);
-      e.old.push({ pnl: p.pnl_pct, reason: p.close_reason });
+      e.old.push({
+        pnl: p.pnl_pct, reason: p.close_reason,
+        // for fee calibration
+        t1: Number.isFinite(t1) ? t1 : null,
+        heldMin: Number(p.minutes_held) || 0,
+        amountSol: Number(p.amount_sol) || 0,
+        binsBelow: Number(p.bin_range?.bins_below) || null,
+        shape: p.strategy === "spot" ? "spot" : "bid_ask",
+        feesUsd: Number(p.fees_earned_usd) || 0,
+        tvl: Number(p.entry_tvl) || null,
+      });
       byMint.set(mint, e);
     }
     return [...byMint.values()].map(e => ({
@@ -169,7 +179,7 @@ const base = {
   shape: { ...ep.shape },
   chart: { ...ep.chart },
   costs: { txSol: 0.003, swapSlippagePct: 1 },
-  feeModel: { maxShare: 0.1 },
+  feeModel: { maxShare: 0.5 },
 };
 const VARIANTS = {
   "config-kamu": base,
@@ -212,6 +222,7 @@ async function solCandles(from, to) {
     return [];
   });
 }
+const loaded = [];
 const results = Object.fromEntries(Object.keys(VARIANTS).map(v => [v, Object.fromEntries(Object.keys(FEE_SCENARIOS).map(f => [f, []]))]));
 const perToken = [];
 
@@ -234,19 +245,50 @@ for (const [n, t] of targets.entries()) {
     // Historical TVL beats today's (a dead pool's TVL now is ~0 and would hand us all its old fees).
     const simPool = { ...pool, activeTvlUsd: t.entryTvl ?? pool.activeTvlUsd };
     const row = { mint: t.mint, name: pool.name, tvlUsed: simPool.activeTvlUsd, tvlSource: t.entryTvl ? "lessons" : "today", binStep: pool.binStep, feePct: pool.feePct, assumedPool: pool.assumed, candles: candles.length, old: t.old };
+    loaded.push({ t, row, candles, simPool, startIndex, label });
+    perToken.push(row);
+  } catch (e) {
+    console.log(`${label} error: ${e.message}`);
+    perToken.push({ mint: t.mint, skipped: e.message });
+  }
+}
+
+// ─── Fee calibration against the old bot's real fees ────────────────────────
+// The raw model (pool volume × fee × our share of TVL) can be off by orders of
+// magnitude: TVL is spread over many bins and GeckoTerminal volume coverage
+// varies. Re-simulate every old position with the same formula and scale the
+// model so its total matches what those positions really earned.
+let calib = { k: 1, positions: 0, realUsd: 0, modelUsd: 0, ratios: [] };
+for (const { t, candles, simPool } of loaded) {
+  for (const o of t.old) {
+    if (!o.t1 || !(o.heldMin > 0) || !(o.amountSol > 0) || !o.binsBelow) continue;
+    const pool = { ...simPool, activeTvlUsd: o.tvl ?? simPool.activeTvlUsd };
+    const m = modelFeesForPosition({ candles, pool, t0: o.t1 - o.heldMin * 60_000, t1: o.t1, capitalSol: o.amountSol, binsBelow: o.binsBelow, shape: o.shape });
+    if (!m.candles) continue;
+    calib.positions++;
+    calib.realUsd += o.feesUsd;
+    calib.modelUsd += m.feesUsd;
+    if (m.feesUsd > 0 && o.feesUsd > 0) calib.ratios.push(o.feesUsd / m.feesUsd);
+  }
+}
+if (calib.positions >= 10 && calib.modelUsd > 0 && !has("no-calibrate")) calib.k = calib.realUsd / calib.modelUsd;
+calib.ratios.sort((a, b) => a - b);
+console.log(`Fee calibration: ${calib.positions} old positions, real $${calib.realUsd.toFixed(2)} vs model $${calib.modelUsd.toFixed(4)} → factor ×${calib.k.toFixed(1)}`);
+
+for (const { t, row, candles, simPool, startIndex, label } of loaded) {
+  try {
     for (const [vName, cfg] of Object.entries(VARIANTS)) {
       for (const [fName, mult] of Object.entries(FEE_SCENARIOS)) {
-        const trades = simulateMint({ candles, pool: simPool, cfg, feeMult: mult, startIndex }).map(tr => ({ ...tr, mint: t.mint, name: pool.name }));
+        const trades = simulateMint({ candles, pool: simPool, cfg, feeMult: mult * calib.k, startIndex }).map(tr => ({ ...tr, mint: t.mint, name: simPool.name }));
         results[vName][fName].push(...trades);
         if (vName === "config-kamu" && fName === "sedang") row.trades = trades;
       }
     }
-    perToken.push(row);
     const mid = summarize(row.trades ?? []);
-    console.log(`${label} ${pool.name}: ${mid.trades ?? 0} trade(s), avg ${mid.avgPnlPct?.toFixed(2) ?? "-"}%`);
+    console.log(`${label} ${simPool.name}: ${mid.trades ?? 0} trade(s), avg ${mid.avgPnlPct?.toFixed(2) ?? "-"}%`);
   } catch (e) {
-    console.log(`${label} error: ${e.message}`);
-    perToken.push({ mint: t.mint, skipped: e.message });
+    console.log(`${label} simulation error: ${e.message}`);
+    row.skipped = e.message;
   }
 }
 
@@ -269,10 +311,11 @@ for (const [v, byFee] of Object.entries(results)) for (const [fName, trades] of 
   const q = (a, x) => (a.length ? a[Math.min(a.length - 1, Math.floor(x * a.length))] : NaN);
   const mean = a => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : NaN);
   lines.push("", "## Kalibrasi fee (% modal per jam)", "",
+    `Faktor kalibrasi: **×${calib.k.toFixed(1)}** dari ${calib.positions} posisi lama (fee asli $${calib.realUsd.toFixed(2)} vs model mentah $${calib.modelUsd.toFixed(4)}; rasio per posisi median ×${f(calib.ratios[Math.floor(calib.ratios.length / 2)], 1)}). Semua skenario fee dikalikan faktor ini.`, "",
     "| | Median | Rata-rata | p90 |", "|---|---|---|---|",
     `| Model backtest (config-kamu, sedang) | ${f(q(model, 0.5), 3)} | ${f(mean(model), 3)} | ${f(q(model, 0.9), 3)} |`,
     `| Bot lama (asli, dari lessons.json) | ${real.length ? f(q(real, 0.5), 3) : "-"} | ${real.length ? f(mean(real), 3) : "-"} | ${real.length ? f(q(real, 0.9), 3) : "-"} |`, "",
-    "Range bot lama lebih sempit (lebih padat per bin), jadi fee aslinya wajar sedikit lebih tinggi per jam. Kalau model jauh di atas bot lama, angka fee backtest terlalu optimis.");
+    "Range bot lama (69 bin) lebih padat per bin daripada range EvilPanda, jadi fee per jam bot lama wajar lebih tinggi. Yang penting: model dikalibrasi ke total fee asli lo, bukan tebakan.");
 }
 lines.push("", "## Alasan exit (config-kamu, fee sedang)", "", "| Rule | Jumlah | Avg PnL % |", "|---|---|---|");
 for (const [rule, r] of Object.entries(summarize(results["config-kamu"].sedang).byRule ?? {})) lines.push(`| ${rule} | ${r.n} | ${f(r.avgPnl)} |`);
@@ -303,7 +346,7 @@ for (const r of perToken) {
 lines.push("", "\\* pool data not available any more; bin step from lessons.json, fee assumed 1%.", "");
 lines.push("## Batasan", "",
   "- Filter Rugcheck/GMGN/holders tidak bisa di-backtest (tidak ada data historis). Semua token dianggap lolos screening.",
-  "- Fee adalah perkiraan: volume pool × fee dasar × porsi likuiditas kita di sekitar harga. TVL pakai entry_tvl historis dari lessons.json (fallback: TVL hari ini), porsi kita dibatasi maks 10%. Skenario rendah/tinggi = ×0.5/×2. Dynamic fee diabaikan.",
+  "- Fee: volume pool × fee dasar × porsi likuiditas kita di sekitar harga (TVL historis dari lessons.json), lalu dikalibrasi ke fee asli 243 posisi bot lama. Porsi maks 50% fee pool. Skenario rendah/tinggi = ×0.5/×2 di atas kalibrasi.",
   "- Range penuh diasumsikan (biaya bin-array tidak diketahui historis); live bot bisa memendekkan range.",
   "- Pemilihan pool (skor fee/TVL ÷ jumlah bin) tidak bisa di-backtest: hanya satu pool per token yang disimulasikan. Uji lewat paper trading.",
   "- Batas 3 posisi bersamaan tidak disimulasikan; tiap token dihitung sendiri.",

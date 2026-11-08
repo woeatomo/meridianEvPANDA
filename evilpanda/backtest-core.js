@@ -103,8 +103,8 @@ export function simulateMint({ candles, pool, cfg, feeMult = 1, startIndex = 0 }
       if (idx >= 0 && idx < pos.bins.length) {
         const poolFeesSol = k.vUsd * pool.feePct / 100 / k.solUsd;
         const near = liquidityNearPrice(pos.bins, pool.binStep, k.c, 3);
-        // Share is capped: other LPs pile into an active pool, so we never own most of its fees.
-        fee = feeEstimate(poolFeesSol, near, pool.activeTvlUsd / k.solUsd, cfg.feeModel?.maxShare ?? 0.1) * feeMult;
+        // Raw TVL-based share × calibration factor (feeMult), never more than maxShare of the pool's fees.
+        fee = Math.min(poolFeesSol * (cfg.feeModel?.maxShare ?? 0.5), feeEstimate(poolFeesSol, near, pool.activeTvlUsd / k.solUsd) * feeMult);
       }
       pos.fees += fee;
       pos.feeLog.push(fee);
@@ -139,6 +139,32 @@ export function simulateMint({ candles, pool, cfg, feeMult = 1, startIndex = 0 }
   }
   if (pos) close(candles.length - 1, candles.at(-1).c, "END_OF_DATA", "still open at end of data");
   return trades;
+}
+
+/**
+ * Uncalibrated model fees for a known historical position (used to calibrate
+ * the fee model against what the old bot really earned). Same formula as
+ * simulateMint with feeMult = 1 and no share cap; partial candles are weighted.
+ * @returns {{feesUsd:number, candles:number}}
+ */
+export function modelFeesForPosition({ candles, pool, t0, t1, capitalSol, binsBelow, shape = "bid_ask" }) {
+  const start = candles.findIndex(k => k.t + 900_000 > t0);
+  if (start < 0 || !(t1 > t0)) return { feesUsd: 0, candles: 0 };
+  const bins = buildBins({ capitalSol, entryPrice: candles[start].o, binStep: pool.binStep, binsBelow, shape });
+  let feesUsd = 0;
+  let n = 0;
+  for (let i = start; i < candles.length && candles[i].t < t1; i++) {
+    const k = candles[i];
+    const overlap = (Math.min(t1, k.t + 900_000) - Math.max(t0, k.t)) / 900_000;
+    if (overlap <= 0) continue;
+    n++;
+    const idx = activeIndex(bins, pool.binStep, k.c);
+    if (idx < 0 || idx >= bins.length) continue;
+    const poolFeesSol = k.vUsd * pool.feePct / 100 / k.solUsd;
+    const near = liquidityNearPrice(bins, pool.binStep, k.c, 3);
+    feesUsd += feeEstimate(poolFeesSol, near, pool.activeTvlUsd / k.solUsd) * overlap * k.solUsd;
+  }
+  return { feesUsd, candles: n };
 }
 
 /** Price at which position PnL equals `targetPct` (bisection), bounded by the gap price. */
