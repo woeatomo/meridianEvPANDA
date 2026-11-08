@@ -236,7 +236,11 @@ export function buildEvilPandaConfig(e = {}) {
     closeDelaySec: 20,          // wait after the candle boundary for data to settle
   });
   const entry = pick(e.entry, {
-    freshBreakCandles: 1,       // break above Supertrend must be within the last N closed candles
+    mode: "breakout",           // breakout | pullback | after_pump  (see evilpanda/entry.js; compare in the backtest)
+    signalWindowCandles: 16,    // pullback/after_pump must happen within N candles (4h) of the Supertrend break
+    pullbackRetracePct: 10,     // pullback: close this far below the high since the break, still above Supertrend
+    afterPumpPct: 30,           // after_pump: close this far above the break close
+    freshBreakCandles: 1,       // (legacy, unused) kept so old configs still load
     maxPriceMovePct: 5,         // abort if price moved more than this between signal and submit
     maxEntryDelayMin: 5,        // skip entries if the cycle runs later than this after the candle close
     watchlistTtlHours: 6,

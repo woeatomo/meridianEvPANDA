@@ -354,3 +354,46 @@ test("expected-fee score: high bin step beats a higher fee/TVL on a low bin step
   assert.equal(rankByExpectedFee([p("c", 80, 5), p("d", 250, 0.6)], 85)[0].pool_address, "c");
   assert.equal(expectedFeeScore(p("e", 100, null), 85), 0);
 });
+
+// ─── Entry modes ─────────────────────────────────────────────────────────────
+import { entrySignal } from "../evilpanda/entry.js";
+import { series as indSeries } from "../evilpanda/indicators.js";
+
+function entryCandles(after) {
+  const ks = [];
+  let p = 1;
+  const push = c => { const o = p; ks.push({ t: ks.length * 900_000, o, h: Math.max(o, c) * 1.003, l: Math.min(o, c) * 0.997, c, v: 1 }); p = c; };
+  for (let i = 0; i < 60; i++) push(p * 0.99);   // downtrend
+  for (let i = 0; i < 4; i++) push(p * 1.06);    // breakout
+  for (const m of after) push(p * m);
+  return ks;
+}
+const fired = (ks, e) => { const s = indSeries(ks); const out = []; for (let i = 1; i < ks.length; i++) if (entrySignal(s, i, e).enter) out.push(i); return out; };
+
+test("entry breakout = the Supertrend flip candle (same as before)", () => {
+  const ks = entryCandles([1.01, 1.01, 1.01]);
+  const s = indSeries(ks);
+  const flips = []; for (let i = 1; i < ks.length; i++) if (s.st[i] && s.st[i - 1] && s.st[i].direction === "up" && s.st[i - 1].direction === "down") flips.push(i);
+  assert.deepEqual(fired(ks, { mode: "breakout" }), flips);
+  assert.ok(flips.length >= 1);
+});
+
+test("entry pullback fires once, on the first close 10% under the post-break high, above Supertrend", () => {
+  const ks = entryCandles([1.05, 1.05, 0.95, 0.96, 0.99, 1.02, 0.97]);
+  const e = { mode: "pullback", pullbackRetracePct: 10, signalWindowCandles: 16 };
+  const hits = fired(ks, e);
+  assert.equal(hits.length, 1, `fired at ${hits}`);
+  const s = indSeries(ks);
+  assert.ok(ks[hits[0]].c > s.st[hits[0]].value, "still above Supertrend");
+});
+
+test("entry after_pump fires once when the close is +30% above the break close", () => {
+  const ks = entryCandles([1.1, 1.1, 1.1, 1.05, 1.02]);
+  const hits = fired(ks, { mode: "after_pump", afterPumpPct: 30, signalWindowCandles: 16 });
+  assert.equal(hits.length, 1);
+});
+
+test("no pullback entry once the break has failed (Supertrend flipped down)", () => {
+  const ks = entryCandles([0.8, 0.8, 0.85]);
+  assert.deepEqual(fired(ks, { mode: "pullback", pullbackRetracePct: 10, signalWindowCandles: 16 }), []);
+});

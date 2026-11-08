@@ -39,7 +39,7 @@ The app is the standalone bot with the EvilPanda strategy layer (`evilpanda/`). 
 
 ## EvilPanda modules
 
-- `evilpanda/indicators.js`, `range.js`, `filters.js`, `exits.js`: pure rule code, covered by `test/evilpanda.test.js`.
+- `evilpanda/indicators.js`, `range.js`, `filters.js`, `exits.js`, `entry.js`, `adaptive.js`, `sim.js`, `backtest-core.js`: pure rule code shared by the live bot and the backtest, covered by `test/evilpanda.test.js`.
 - `evilpanda/sources.js`: read-only HTTP adapters (Jupiter, Rugcheck, GMGN, Meteora, GeckoTerminal, Discord relay).
 - `evilpanda/engine.js`: watchlist, candle schedule, entries and exits; state in `evilpanda-state.json`.
 - `evilpanda/llm.js`: optional narrative veto; failures fall back to the rules.

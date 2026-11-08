@@ -23,7 +23,8 @@ import { isDevBlocked } from "../dev-blocklist.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { checkMintOnChain } from "../standalone/screening.js";
 import * as src from "./sources.js";
-import { snapshot, candlesSinceBreakUp, supertrend } from "./indicators.js";
+import { snapshot, series, supertrend } from "./indicators.js";
+import { entrySignal } from "./entry.js";
 import { rejectTokenBasics, rejectRugcheck, rejectGmgnFetch, rejectPool, rankPools, chooseShape } from "./filters.js";
 import { fastExitDecision, candleExitDecision, updateOor, narrativeProxyHealthy } from "./exits.js";
 import { entryVeto, lowYieldVeto } from "./llm.js";
@@ -251,9 +252,9 @@ async function tryEntries() {
       try { ({ snap, candles: ks, stale } = await candleSnapshot(w.mint, w.poolAddress, { requireLatest: true })); }
       catch (err) { log("ep_entry", `${w.mint.slice(0, 8)} candles unavailable: ${err.message}`); continue; }
       if (stale) { log("ep_entry", `${w.mint.slice(0, 8)} latest 15m candle not published yet — skipped`); continue; }
-      const since = candlesSinceBreakUp(ks, ep().chart);
-      if (!snap || snap.stDirection !== "up" || since == null || since >= ep().entry.freshBreakCandles) continue;
-      log("ep_entry", `${w.mint.slice(0, 8)} broke above Supertrend (close ${snap.close} > ST ${snap.supertrend.toFixed(10)})`);
+      const sig = entrySignal(series(ks, ep().chart), ks.length - 1, ep().entry);
+      if (!snap || !sig.enter) continue;
+      log("ep_entry", `${w.mint.slice(0, 8)} entry signal (${ep().entry.mode}): ${sig.reason}`);
       // Range depth from this token's volatility, then the pool that pays OUR position best at that depth.
       const depth = chooseDepth(ks, ep().range);
       const best = rankPoolsFor(w.pools?.length ? w.pools : [], depth.depthPct)[0];

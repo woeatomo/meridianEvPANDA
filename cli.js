@@ -81,7 +81,9 @@ async function main() {
         const { chooseDepth, rankByExpectedFee } = await import('./evilpanda/adaptive.js');
         const depth = chooseDepth(ks, config.evilpanda.range);
         const ranked = screened.pools ? rankByExpectedFee(screened.pools, depth.depthPct).map(p => ({ pool: p.pool_address, binStep: p.dlmm_params?.bin_step, feeTvl1h: p.fee_active_tvl_ratio_1h, score: p._score })) : [];
-        chart = { chartPool: pool, candlesSinceBreakUp: candlesSinceBreakUp(ks, c), latest: snapshot(ks, c), range: depth, poolsByExpectedFee: ranked };
+        const { series } = await import('./evilpanda/indicators.js');
+        const { entrySignal } = await import('./evilpanda/entry.js');
+        chart = { chartPool: pool, candlesSinceBreakUp: candlesSinceBreakUp(ks, c), entryNow: { mode: config.evilpanda.entry.mode, ...entrySignal(series(ks, c), ks.length - 1, config.evilpanda.entry) }, latest: snapshot(ks, c), range: depth, poolsByExpectedFee: ranked };
       } catch (e) { chart = { error: e.message }; }
       return out({ pass: screened.pass, reason: screened.reason, pool: screened.pool?.pool_address ?? null, binStep: screened.pool?.dlmm_params?.bin_step ?? null, rugcheckScore: screened.rugcheck?.score_normalised ?? null, gmgn: screened.gmgn ?? null, chart });
     }

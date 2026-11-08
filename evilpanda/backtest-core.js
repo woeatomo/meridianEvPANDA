@@ -10,6 +10,7 @@ import { fastExitDecision, candleExitDecision, updateOor, narrativeProxyHealthy 
 import { binsForDownsidePct } from "./range.js";
 import { buildBins, valueAt, positionView, liquidityNearPrice, feeEstimate, activeIndex } from "./sim.js";
 import { chooseDepth } from "./adaptive.js";
+import { entrySignal } from "./entry.js";
 
 const H = 3_600_000;
 
@@ -115,9 +116,8 @@ export function simulateMint({ candles, pool, cfg, feeMult = 1, startIndex = 0 }
       continue;
     }
 
-    // Entry: fresh break above Supertrend on the close of candle i → fill at the next open.
-    const snap = snapshotAt(s, i);
-    if (!snap?.stBreakUp || i + 1 >= candles.length) continue;
+    // Entry signal on the close of candle i (same rule as the live bot) → fill at the next open.
+    if (i + 1 >= candles.length || !entrySignal(s, i, cfg.entry ?? { mode: "breakout" }).enter) continue;
     const next = candles[i + 1];
     const p0 = next.o;
     const shape = cfg.shape.default;

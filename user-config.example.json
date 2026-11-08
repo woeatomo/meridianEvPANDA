@@ -99,7 +99,10 @@
       "macdSignal": 9
     },
     "entry": {
-      "freshBreakCandles": 1,
+      "mode": "breakout",
+      "signalWindowCandles": 16,
+      "pullbackRetracePct": 10,
+      "afterPumpPct": 30,
       "maxPriceMovePct": 5,
       "maxEntryDelayMin": 5,
       "watchlistTtlHours": 6,

@@ -178,20 +178,29 @@ const base = {
   range: { ...ep.range, adaptive: { ...ep.range.adaptive } },
   shape: { ...ep.shape },
   chart: { ...ep.chart },
+  entry: { ...ep.entry },
   costs: { txSol: 0.003, swapSlippagePct: 1 },
   feeModel: { maxShare: 0.5 },
 };
 const VARIANTS = {
   "config-kamu": base,
   "murni-evilpanda": { ...base, management: { ...base.management, takeProfitPct: null, trailingTakeProfit: false }, exits: { ...base.exits, oorAboveWaitMinutes: Infinity, oorBelowWaitMinutes: Infinity, lowYieldMinFeePerTvl24h: null } },
+  "murni-pullback-10%": null, // filled below
+  "murni-setelah-pump-30%": null,
   "range-85-tetap": { ...base, range: { ...base.range, mode: "fixed", targetDownsidePct: 85 } },
   "range-70-tetap": { ...base, range: { ...base.range, mode: "fixed", targetDownsidePct: 70 } },
   "range-50-tetap": { ...base, range: { ...base.range, mode: "fixed", targetDownsidePct: 50 } },
   "spot": { ...base, shape: { ...base.shape, default: "spot" } },
   "oor-atas-min1%": { ...base, exits: { ...base.exits, oorAboveMinPnlPct: 1 } },
   "low-yield-6jam": { ...base, exits: { ...base.exits, lowYieldMinAgeMinutes: 360 } },
+  "entry-pullback-10%": { ...base, entry: { ...base.entry, mode: "pullback", pullbackRetracePct: 10 } },
+  "entry-pullback-20%": { ...base, entry: { ...base.entry, mode: "pullback", pullbackRetracePct: 20 } },
+  "entry-setelah-pump-30%": { ...base, entry: { ...base.entry, mode: "after_pump", afterPumpPct: 30 } },
+  "entry-setelah-pump-60%": { ...base, entry: { ...base.entry, mode: "after_pump", afterPumpPct: 60 } },
   "tanpa-low-yield": { ...base, exits: { ...base.exits, lowYieldMinFeePerTvl24h: null } },
 };
+VARIANTS["murni-pullback-10%"] = { ...VARIANTS["murni-evilpanda"], entry: { ...base.entry, mode: "pullback", pullbackRetracePct: 10 } };
+VARIANTS["murni-setelah-pump-30%"] = { ...VARIANTS["murni-evilpanda"], entry: { ...base.entry, mode: "after_pump", afterPumpPct: 30 } };
 const FEE_SCENARIOS = { rendah: 0.5, sedang: 1, tinggi: 2 };
 
 // ─── Run ────────────────────────────────────────────────────────────────────
