@@ -288,6 +288,20 @@ export function buildEvilPandaConfig(e = {}) {
     narrativeProxy: true,
     minVolumeRatio: 0.5,        // last 6h volume vs previous 6h (1h candles)
   });
+  const walletFinder = pick(e.walletFinder, {
+    pools: 15,                  // busiest token/SOL DLMM pools to scan
+    minPoolVolume: 50_000,      // 24h pool volume floor for scanned pools
+    maxWallets: 80,             // wallets to score (each costs pools × 1–2 API calls)
+    minClosed: 5,               // closed positions in the scanned pools
+    maxClosed: 400,             // more than this looks like a bot / vault
+    minPoolsTraded: 2,
+    minWinRatePct: 55,
+    minTotalPnlSol: 0,
+    minAvgDepositUsd: 30,
+    maxAvgDepositUsd: 20_000,
+    maxWorstPnlPct: -60,        // skip wallets that rode a position into the ground
+    requestDelayMs: 120,        // Meteora API limit is 30 req/s
+  });
   const paper = pick(e.paper, {
     enabled: true,              // only active in shadow mode: every "would deploy" becomes a simulated position
     pollSec: 60,
@@ -305,7 +319,7 @@ export function buildEvilPandaConfig(e = {}) {
   llm.apiKey = nonEmptyString(process.env.LLM_API_KEY, process.env.OPENROUTER_API_KEY, "");
   return {
     enabled: e.enabled !== false,
-    sources, screener, filters, rugcheck, gmgn, discord, chart, entry, range, pool, shape, exits, paper, llm,
+    sources, screener, filters, rugcheck, gmgn, discord, chart, entry, range, pool, shape, exits, paper, walletFinder, llm,
   };
 }
 

@@ -397,3 +397,39 @@ test("no pullback entry once the break has failed (Supertrend flipped down)", ()
   const ks = entryCandles([0.8, 0.8, 0.85]);
   assert.deepEqual(fired(ks, { mode: "pullback", pullbackRetracePct: 10, signalWindowCandles: 16 }), []);
 });
+
+// ─── Wallet finder scoring ───────────────────────────────────────────────────
+import { walletMetrics, qualifyWallet, walletScore, rankWallets } from "../evilpanda/wallet-score.js";
+
+const closedPos = (pnlSol, pnlPct, dep = 100, fees = 2) => ({ pnlSol, pnlUsd: pnlSol * 150, pnlSolPctChange: pnlPct, allTimeDeposits: { total: { usd: dep } }, allTimeFees: { total: { usd: fees } } });
+
+test("wallet metrics aggregate closed positions across pools", () => {
+  const m = walletMetrics([{ pool: "a", positions: [closedPos(0.1, 5), closedPos(-0.05, -3)] }, { pool: "b", positions: [closedPos(0.2, 8)] }, { pool: "c", positions: [] }], 2);
+  assert.equal(m.closed, 3);
+  assert.equal(m.poolsTraded, 2);
+  assert.equal(Math.round(m.winRatePct), 67);
+  assert.ok(Math.abs(m.totalPnlSol - 0.25) < 1e-9);
+  assert.equal(m.avgDepositUsd, 100);
+  assert.equal(m.worstPnlPct, -3);
+  assert.equal(m.openPools, 2);
+});
+
+test("wallet qualification rejects small samples, bots, whales, losers and blow-ups", () => {
+  const c = buildEvilPandaConfig({}).walletFinder;
+  const good = walletMetrics([{ pool: "a", positions: [closedPos(0.1, 5), closedPos(0.1, 4), closedPos(-0.02, -2)] }, { pool: "b", positions: [closedPos(0.1, 6), closedPos(0.05, 3), closedPos(0.02, 1)] }]);
+  assert.equal(qualifyWallet(good, c), null);
+  assert.match(qualifyWallet({ ...good, closed: 3 }, c), /closed/);
+  assert.match(qualifyWallet({ ...good, closed: 900 }, c), /bot/);
+  assert.match(qualifyWallet({ ...good, poolsTraded: 1 }, c), /pool/);
+  assert.match(qualifyWallet({ ...good, winRatePct: 40 }, c), /win rate/);
+  assert.match(qualifyWallet({ ...good, totalPnlSol: -0.1 }, c), /PnL/);
+  assert.match(qualifyWallet({ ...good, avgDepositUsd: 50_000 }, c), /whale/);
+  assert.match(qualifyWallet({ ...good, worstPnlPct: -80 }, c), /worst/);
+});
+
+test("wallet ranking: a consistent 40-trade wallet beats a lucky 5/5 wallet", () => {
+  const lucky = { closed: 5, winRatePct: 100, totalPnlSol: 0.5 };
+  const steady = { closed: 40, winRatePct: 75, totalPnlSol: 0.5 };
+  assert.ok(walletScore(steady) > walletScore(lucky));
+  assert.equal(rankWallets([{ wallet: "lucky", metrics: lucky }, { wallet: "steady", metrics: steady }])[0].wallet, "steady");
+});

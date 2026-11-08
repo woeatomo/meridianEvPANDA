@@ -16,6 +16,7 @@
     "pm2:logs": "pm2 logs meridian --lines 100",
     "dev": "DRY_RUN=true node index.js",
     "backtest": "node backtest/run.js",
+    "find-wallets": "node wallet-finder/run.js",
     "test": "npm run test:syntax && npm run test:standalone && node --test test/cleanup.test.js test/evilpanda.test.js",
     "test:syntax": "node scripts/check-syntax.js",
     "postinstall": "node scripts/patch-anchor.js",

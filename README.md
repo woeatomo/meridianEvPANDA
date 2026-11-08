@@ -27,6 +27,15 @@ npm run backtest -- --mints MINT1,MINT2 --days 30
 
 Simulates the chart rules (entry on Supertrend break, range, every exit rule) with the same code as the live bot, for several variants (`config-kamu`, `murni-evilpanda`, fixed ranges −85/−70/−50%, `spot`, `oor-atas-min1%`) and three fee scenarios. Writes `backtest/results/backtest-*.md` and `trades-*.csv`; downloaded candles are cached in `backtest/cache/`. Rugcheck/GMGN filters cannot be backtested and fees are estimates — compare variants, don't read the numbers as a profit forecast.
 
+### Smart wallet finder
+
+```sh
+npm run find-wallets                 # scan the 15 busiest token/SOL DLMM pools
+npm run find-wallets -- --add 5      # also add the top 5 to smart-wallets.json
+```
+
+Finds wallets with open positions in the busiest memecoin DLMM pools (read on-chain via `getProgramAccounts` — needs an RPC plan that allows it), pulls their closed positions in those pools from Meteora's PnL API, and ranks them by win rate (shrunk for small samples) and profit. Filters live in `evilPanda.walletFinder`. Report: `wallet-finder/results/wallets-*.md`.
+
 ### Paper trading (shadow mode)
 
 With `shadowMode: true` and `evilPanda.paper.enabled` (default), every "would deploy" opens a simulated position priced from live Meteora data every minute and closed by the same exit rules. `node cli.js paper` shows results; Telegram gets 📝 alerts. Nothing touches the wallet.
