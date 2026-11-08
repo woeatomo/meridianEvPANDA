@@ -15,6 +15,7 @@
 //
 // Data is cached in backtest/cache/ so re-runs (other settings) are offline.
 
+import "../envcrypt.js"; // load .env before config.js reads it
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";

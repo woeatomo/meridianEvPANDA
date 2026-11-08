@@ -12,6 +12,7 @@
 // 4. Score: win rate (shrunk for small samples) + profit; filters in evilPanda.walletFinder.
 // Report → wallet-finder/results/wallets-<time>.md
 
+import "../envcrypt.js"; // load .env before config.js reads it
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
