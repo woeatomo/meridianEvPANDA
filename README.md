@@ -34,6 +34,8 @@ npm run find-wallets                 # scan the 15 busiest token/SOL DLMM pools
 npm run find-wallets -- --add 5      # also add the top 5 to smart-wallets.json
 ```
 
+**LP Agent (optional):** with `LPAGENT_API_KEY` (Premium plan — `/top-lpers` is not on Basic) the finder also pulls each scanned pool's top LPers from LP Agent. They are re-scored on Meteora data with the same filters, so nothing is added on LP Agent's word alone.
+
 **Automatic (default):** the daemon runs this once a day (`walletFinder.auto`): it adds up to 3 new qualified wallets per run (list cap 15), removes wallets that turned unprofitable, became bot-like or have had no open DLMM position for 3 days, and sends a 👛 Telegram summary. Wallets with `"category": "pinned"` in `smart-wallets.json` are never removed. `npm run find-wallets -- --auto` runs the same job by hand.
 
 Finds wallets with open positions in the busiest memecoin DLMM pools (read on-chain via `getProgramAccounts` — needs an RPC plan that allows it), pulls their closed positions in those pools from Meteora's PnL API, and ranks them by win rate (shrunk for small samples) and profit. Filters live in `evilPanda.walletFinder`. Report: `wallet-finder/results/wallets-*.md`.

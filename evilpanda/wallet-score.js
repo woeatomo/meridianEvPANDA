@@ -71,6 +71,24 @@ export function walletScore(m) {
   return shrunkWin * 100 + profit * 5;
 }
 
+/**
+ * Wallet addresses from an LP Agent /pools/{id}/top-lpers response. The schema
+ * isn't documented, so accept the usual field names and only base58 pubkeys.
+ */
+export function lpAgentOwners(json) {
+  const list = Array.isArray(json?.data) ? json.data : Array.isArray(json?.data?.data) ? json.data.data : Array.isArray(json) ? json : [];
+  const re = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+  const out = [];
+  for (const r of list) {
+    const w = [r?.owner, r?.wallet, r?.address, r?.owner_address, r?.wallet_address, r?.user].find(v => typeof v === "string" && re.test(v));
+    if (!w) continue;
+    const total = Number(r?.total_lp);
+    const win = Number(r?.win_lp);
+    out.push({ wallet: w, winRate: total > 0 && Number.isFinite(win) ? win / total : null, inflowUsd: Number(r?.total_inflow) || null });
+  }
+  return out;
+}
+
 export function rankWallets(rows) {
   return [...rows].sort((a, b) => walletScore(b.metrics) - walletScore(a.metrics));
 }

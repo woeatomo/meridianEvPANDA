@@ -467,3 +467,15 @@ test("auto manage: remove on bad performance or inactivity, never pinned, add be
   assert.ok(!picked.some(r => r.wallet === "Z"), "removed wallets stay out during cooldown");
   assert.equal(walletsToAdd(rows, new Set(Array.from({ length: 15 }, (_, i) => `w${i}`)), {}, c, now).length, 0, "list full");
 });
+
+import { lpAgentOwners } from "../evilpanda/wallet-score.js";
+test("LP Agent top-lpers parsing accepts common owner field names and skips junk", () => {
+  const w1 = "7xRo6Tpga15qmFiwv3BwS2GVrLAjejpLy2U5CMaK1cmJ";
+  const w2 = "WrAWMBeoTqrKZWBkrmzwXYpMWwGMKb78Nnmo3d4L2NE";
+  const out = lpAgentOwners({ data: [{ owner: w1, win_lp: 8, total_lp: 10, total_inflow: "1200" }, { wallet: w2 }, { owner: "not-a-key" }, null] });
+  assert.deepEqual(out.map(o => o.wallet), [w1, w2]);
+  assert.equal(out[0].winRate, 0.8);
+  assert.equal(out[1].winRate, null);
+  assert.deepEqual(lpAgentOwners({ data: { data: [{ address: w1 }] } }).map(o => o.wallet), [w1]);
+  assert.deepEqual(lpAgentOwners(null), []);
+});

@@ -303,6 +303,13 @@ export function buildEvilPandaConfig(e = {}) {
     maxWorstPnlPct: -30,        // skip wallets that rode a position deep into a loss
     requestDelayMs: 120,        // Meteora API limit is 30 req/s
   });
+  walletFinder.lpAgent = pick(e.walletFinder?.lpAgent, {
+    enabled: true,              // used only when LPAGENT_API_KEY is set (top-lpers needs an LP Agent Premium key)
+    baseUrl: "https://api.lpagent.io/open-api/v1",
+    limitPerPool: 20,
+    requestDelayMs: 6500,       // Premium allows 10 requests/min
+  });
+  walletFinder.lpAgent.apiKey = nonEmptyString(process.env.LPAGENT_API_KEY, "");
   walletFinder.auto = pick(e.walletFinder?.auto, {
     enabled: true,              // daemon re-scans and manages the list on its own
     intervalHours: 24,

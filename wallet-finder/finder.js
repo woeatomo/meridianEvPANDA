@@ -15,7 +15,7 @@ import { Connection, PublicKey } from "@solana/web3.js";
 import { config } from "../config.js";
 import { log } from "../logger.js";
 import { getJson } from "../evilpanda/sources.js";
-import { walletMetrics, qualifyWallet, rankWallets, walletScore } from "../evilpanda/wallet-score.js";
+import { walletMetrics, qualifyWallet, rankWallets, walletScore, lpAgentOwners } from "../evilpanda/wallet-score.js";
 import { removalReason, walletsToAdd } from "../evilpanda/wallet-manage.js";
 import { addSmartWallet, removeSmartWallet, listSmartWallets } from "../smart-wallets.js";
 
@@ -87,6 +87,35 @@ async function closedPositions(meteora, pool, wallet) {
   return out;
 }
 
+/**
+ * LP Agent top LPers for each pool (Premium key). Returns Map wallet → info and
+ * a status note. A 401/403 (Basic key, expired plan) stops further calls.
+ */
+async function lpAgentTopLpers(pools, la, progress) {
+  const found = new Map();
+  if (!la.enabled || !la.apiKey) return { found, note: "LP Agent: no LPAGENT_API_KEY (skipped)" };
+  let calls = 0;
+  for (const p of pools) {
+    if (calls++) await sleep(la.requestDelayMs);
+    const q = new URLSearchParams({ chain: "SOL", platform: "meteora", order_by: "total_pnl_native", sort_order: "desc", page: "1", limit: String(la.limitPerPool) });
+    let res;
+    try {
+      res = await fetch(`${la.baseUrl.replace(/\/+$/, "")}/pools/${p.address}/top-lpers?${q}`, { headers: { "x-api-key": la.apiKey }, signal: AbortSignal.timeout(20_000) });
+    } catch (e) { progress(`  LP Agent ${p.name}: ${e.message}`); continue; }
+    if (res.status === 401 || res.status === 403) return { found, note: `LP Agent: HTTP ${res.status} — top-lpers needs an active Premium key; skipped` };
+    if (res.status === 429) { progress("  LP Agent rate limited, waiting 60s"); await sleep(60_000); continue; }
+    if (!res.ok) { progress(`  LP Agent ${p.name}: HTTP ${res.status}`); continue; }
+    const owners = lpAgentOwners(await res.json().catch(() => null));
+    for (const o of owners) {
+      const e = found.get(o.wallet) ?? { pools: new Set(), winRate: o.winRate };
+      e.pools.add(p.address);
+      found.set(o.wallet, e);
+    }
+    progress(`  LP Agent ${p.name}: ${owners.length} top LPer(s)`);
+  }
+  return { found, note: `LP Agent: ${found.size} wallet(s) from top-lpers` };
+}
+
 /** Pools where the wallet has open DLMM positions right now (null if unknown). */
 async function openPoolsOf(meteora, wallet) {
   try {
@@ -128,13 +157,23 @@ export async function scanAndScore(opts = {}) {
     }
   }
 
+  const lp = await lpAgentTopLpers(pools, c.lpAgent ?? config.evilpanda.walletFinder.lpAgent, progress);
+  progress(lp.note);
+
   const listed = listSmartWallets()?.wallets ?? [];
   const listedSet = new Set(listed.map(w => w.address));
-  const fresh = [...seen.entries()]
+  // LP Agent's top LPers first (already ranked by PnL there), then on-chain owners
+  // active in several scanned pools. Every one is re-scored on Meteora data below.
+  const fromLp = [...lp.found.entries()]
     .filter(([w]) => !listedSet.has(w))
+    .sort((a, b) => b[1].pools.size - a[1].pools.size)
+    .map(([w]) => ({ wallet: w, openInScan: seen.get(w)?.pools.size ?? 0, listed: false, source: "lpagent" }));
+  const lpSet = new Set(fromLp.map(x => x.wallet));
+  const fromChain = [...seen.entries()]
+    .filter(([w]) => !listedSet.has(w) && !lpSet.has(w))
     .sort((a, b) => b[1].pools.size - a[1].pools.size || b[1].positions - a[1].positions)
-    .slice(0, c.maxWallets)
-    .map(([w, info]) => ({ wallet: w, openInScan: info.pools.size, listed: false }));
+    .map(([w, info]) => ({ wallet: w, openInScan: info.pools.size, listed: false, source: "onchain" }));
+  const fresh = [...fromLp, ...fromChain].slice(0, c.maxWallets);
   const toScore = [...fresh, ...listed.map(w => ({ wallet: w.address, openInScan: seen.get(w.address)?.pools.size ?? 0, listed: true }))];
   progress(`${seen.size} wallet(s) found; scoring ${fresh.length} new + ${listed.length} on your list…`);
 
@@ -153,10 +192,10 @@ export async function scanAndScore(opts = {}) {
     }
     const metrics = walletMetrics(byPool, t.openInScan);
     const why = qualifyWallet(metrics, c);
-    rows.push({ wallet: t.wallet, listed: t.listed, metrics, pass: !why, why, activeNow: openPools == null ? null : openPools.length > 0 });
+    rows.push({ wallet: t.wallet, listed: t.listed, source: t.source ?? "list", metrics, pass: !why, why, activeNow: openPools == null ? null : openPools.length > 0 });
     if ((i + 1) % 10 === 0) progress(`  scored ${i + 1}/${toScore.length}`);
   }
-  return { at: Date.now(), pools, seen: seen.size, rows, rpcErrors, filters: c };
+  return { at: Date.now(), pools, seen: seen.size, lpAgentNote: lp.note, rows, rpcErrors, filters: c };
 }
 
 /** Apply automatic add/remove decisions to smart-wallets.json. */
@@ -206,11 +245,11 @@ export function writeReport(result, managed = null) {
   const listed = result.rows.filter(r => r.listed);
   const reasons = new Map();
   for (const r of result.rows) if (!r.pass && !r.listed) { const k = r.why.replace(/[\d.$%-]+/g, "#"); reasons.set(k, (reasons.get(k) ?? 0) + 1); }
-  const row = (r, i) => `| ${i + 1} | \`${r.wallet}\` | ${f(walletScore(r.metrics), 1)} | ${r.metrics.closed} | ${r.metrics.poolsTraded} | ${f(r.metrics.winRatePct, 0)} | ${f(r.metrics.totalPnlSol, 3)} | ${f(r.metrics.medianPnlPct)} | ${f(r.metrics.worstPnlPct)} | ${f(r.metrics.avgDepositUsd, 0)} |`;
-  const head = ["| # | Wallet | Score | Closed | Pools | Win % | PnL SOL | Median % | Worst % | Avg size $ |", "|---|---|---|---|---|---|---|---|---|---|"];
+  const row = (r, i) => `| ${i + 1} | \`${r.wallet}\` | ${r.source ?? "-"} | ${f(walletScore(r.metrics), 1)} | ${r.metrics.closed} | ${r.metrics.poolsTraded} | ${f(r.metrics.winRatePct, 0)} | ${f(r.metrics.totalPnlSol, 3)} | ${f(r.metrics.medianPnlPct)} | ${f(r.metrics.worstPnlPct)} | ${f(r.metrics.avgDepositUsd, 0)} |`;
+  const head = ["| # | Wallet | Source | Score | Closed | Pools | Win % | PnL SOL | Median % | Worst % | Avg size $ |", "|---|---|---|---|---|---|---|---|---|---|---|"];
   const lines = [
     `# Smart wallet finder — ${new Date(result.at).toISOString().slice(0, 16)}`, "",
-    `Pools scanned: ${result.pools.length} · wallets with open positions: ${result.seen} · **new qualified: ${passed.length}**`, "",
+    `Pools scanned: ${result.pools.length} · wallets with open positions: ${result.seen} · ${result.lpAgentNote ?? ""} · **new qualified: ${passed.length}**`, "",
     `Filters: ${c.minClosed}–${c.maxClosed} closed, ≥${c.minPoolsTraded} pools, win ≥${c.minWinRatePct}%, PnL > ${c.minTotalPnlSol} SOL, median ≥${c.minMedianPnlPct}% (bot filter), size $${c.minAvgDepositUsd}–$${c.maxAvgDepositUsd}, worst ≥${c.maxWorstPnlPct}%.`, "",
   ];
   if (managed) {
