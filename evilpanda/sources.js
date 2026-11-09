@@ -175,3 +175,33 @@ export async function candles(pool, { mint = null, unit = "minute", aggregate = 
     .filter(k => Number.isFinite(k.c) && k.c > 0 && k.t + periodMs <= now)
     .sort((a, b) => a.t - b.t);
 }
+
+/**
+ * Seed history for the candle book: closed OHLCV candles for a DLMM pool, price
+ * of `mint` in SOL. Retries on 429 (honours Retry-After). With a CoinGecko Demo
+ * key (COINGECKO_API_KEY) it uses the keyed onchain endpoint, which allows far
+ * more calls than the keyless GeckoTerminal API (~5/min).
+ */
+export async function ohlcvHistory(pool, mint, chart) {
+  const keyed = !!chart.coingeckoApiKey;
+  const base = keyed ? "https://api.coingecko.com/api/v3/onchain/networks/solana" : GECKO;
+  const params = new URLSearchParams({ aggregate: String(chart.timeframeMin), limit: String(chart.candles), currency: "token", token: mint });
+  const url = `${base}/pools/${pool}/ohlcv/minute?${params}`;
+  const headers = keyed ? { "x-cg-demo-api-key": chart.coingeckoApiKey } : {};
+  const delay = keyed ? chart.seedDelayMsKeyed : chart.seedDelayMs;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    await pace("gecko-seed", delay);
+    const res = await fetch(url, { headers, signal: AbortSignal.timeout(20_000) });
+    if (res.status === 429) {
+      const ra = Number(res.headers.get("retry-after"));
+      await sleep(Number.isFinite(ra) && ra > 0 ? ra * 1000 : 30_000 * (attempt + 1));
+      continue;
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status} from ${new URL(url).host}`);
+    const data = await res.json();
+    const list = data?.data?.attributes?.ohlcv_list;
+    if (!Array.isArray(list)) throw new Error("ohlcv unavailable");
+    return list.map(([t, o, h, l, c, v]) => ({ t: Number(t) * 1000, o: +o, h: +h, l: +l, c: +c, v: +v })).filter(k => k.c > 0).sort((a, b) => a.t - b.t);
+  }
+  throw new Error("GeckoTerminal rate limit (429) after retries");
+}

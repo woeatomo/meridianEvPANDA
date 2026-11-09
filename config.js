@@ -234,7 +234,11 @@ export function buildEvilPandaConfig(e = {}) {
     bbPeriod: 20, bbStdDev: 2,
     macdFast: 12, macdSlow: 26, macdSignal: 9,
     closeDelaySec: 20,          // wait after the candle boundary for data to settle
+    sampleSec: 60,              // self-built candles: sample each pool's price from Meteora this often
+    seedDelayMs: 15_000,        // keyless GeckoTerminal ≈ 5 calls/min → one history seed per 15s
+    seedDelayMsKeyed: 2_500,    // with a CoinGecko Demo key
   });
+  chart.coingeckoApiKey = nonEmptyString(process.env.COINGECKO_API_KEY, "");
   const entry = pick(e.entry, {
     mode: "breakout",           // breakout | pullback | after_pump  (see evilpanda/entry.js; compare in the backtest)
     signalWindowCandles: 16,    // pullback/after_pump must happen within N candles (4h) of the Supertrend break

@@ -31,6 +31,7 @@ import { entryVeto, lowYieldVeto } from "./llm.js";
 import { binsForDownsidePct } from "./range.js";
 import { chooseDepth, rankByExpectedFee } from "./adaptive.js";
 import * as paper from "./paper.js";
+import { CandleBook } from "./candlebook.js";
 
 const STATE_FILE = repoPath("evilpanda-state.json");
 const ep = () => config.evilpanda;
@@ -198,9 +199,21 @@ export function onWalletSignal(signal) {
 
 // ─── Candles ────────────────────────────────────────────────────────────────
 
-async function chartPool(mint, dlmmPool) {
-  const c = ep().chart;
-  return c.source === "dlmm_pool" && dlmmPool ? dlmmPool : src.chartPoolFor(mint, c.requestDelayMs);
+// Candles come from the CandleBook: each DLMM pool is seeded once with real
+// history from GeckoTerminal (rate-limited, queued) and extended by sampling the
+// pool price from Meteora every minute. See evilpanda/candlebook.js.
+
+const CANDLE_FILE = repoPath("evilpanda-candles.json");
+let book = null;
+function candleBook() {
+  if (book) return book;
+  const periodMs = ep().chart.timeframeMin * 60_000;
+  try { book = CandleBook.fromJSON(JSON.parse(fs.readFileSync(CANDLE_FILE, "utf8")), { periodMs, maxCandles: ep().chart.candles }); }
+  catch { book = new CandleBook({ periodMs, maxCandles: ep().chart.candles }); }
+  return book;
+}
+function saveCandles() {
+  try { fs.writeFileSync(CANDLE_FILE, JSON.stringify(candleBook())); } catch (e) { log("ep_warn", `candle save failed: ${e.message}`); }
 }
 
 /** Start time of the candle that most recently closed. */
@@ -209,23 +222,84 @@ function lastClosedCandleStart(now = Date.now()) {
   return Math.floor(now / period) * period - period;
 }
 
+// ── Seeding queue (one GeckoTerminal call at a time, paced in sources.ohlcvHistory)
+const seedQueue = new Map(); // pool → mint
+let seeding = false;
+function requestSeed(pool, mint) {
+  if (!pool || !mint || seedQueue.has(pool)) return;
+  seedQueue.set(pool, mint);
+  void runSeeds();
+}
+async function runSeeds() {
+  if (seeding) return;
+  seeding = true;
+  try {
+    while (seedQueue.size) {
+      const [pool, mint] = seedQueue.entries().next().value;
+      try {
+        const ks = await src.ohlcvHistory(pool, mint, ep().chart);
+        candleBook().seed(pool, ks);
+        saveCandles();
+        log("ep_candles", `${mint.slice(0, 8)} seeded ${ks.length} candles from ${ep().chart.coingeckoApiKey ? "CoinGecko" : "GeckoTerminal"}`);
+      } catch (err) {
+        log("ep_candles", `${mint.slice(0, 8)} seed failed: ${err.message} — will retry`);
+        await new Promise(r => setTimeout(r, 60_000));
+        seedQueue.delete(pool);
+        seedQueue.set(pool, mint); // back of the queue
+        continue;
+      }
+      seedQueue.delete(pool);
+    }
+  } finally {
+    seeding = false;
+  }
+}
+
+/** Pools whose candles we need: passing candidates, paper and live positions. */
+function trackedPools() {
+  const out = new Map(); // pool → mint
+  for (const w of Object.values(state.watchlist)) if (w.pass && w.poolAddress) out.set(w.poolAddress, w.mint);
+  for (const pp of paper.openPaperPositions()) out.set(pp.pool, pp.mint);
+  for (const rec of Object.values(state.positions)) if (rec.pool && rec.mint) out.set(rec.pool, rec.mint);
+  return out;
+}
+
+let sampling = false;
+async function sampleTick() {
+  if (sampling) return;
+  sampling = true;
+  try {
+    const pools = trackedPools();
+    const b = candleBook();
+    for (const [pool, mint] of pools) {
+      try {
+        const row = await src.discoveryPool(pool, "5m");
+        b.sample(pool, Number(row.pool_price), Date.now(), Number(row.volume));
+        if (b.needsSeed(pool)) requestSeed(pool, mint);
+      } catch { /* one missed sample is harmless */ }
+    }
+    b.prune(new Set(pools.keys()));
+    saveCandles();
+  } finally {
+    sampling = false;
+  }
+}
+
 /**
- * Candles + indicator snapshot. With `requireLatest`, the newest candle must be
- * the one that just closed; GeckoTerminal can publish late, so retry briefly
- * and report `stale: true` instead of evaluating an older candle.
+ * Candles + indicator snapshot for a pool. `stale` when history isn't seeded yet
+ * or the candle that just closed is missing (never evaluate an older candle).
  */
 async function candleSnapshot(mint, dlmmPool, { requireLatest = false } = {}) {
   const c = ep().chart;
-  const pool = await chartPool(mint, dlmmPool);
-  const expected = lastClosedCandleStart();
-  let ks = [];
-  for (let attempt = 0; attempt < (requireLatest ? 3 : 1); attempt++) {
-    if (attempt > 0) await new Promise(r => setTimeout(r, 20_000));
-    ks = await src.candles(pool, { mint, unit: "minute", aggregate: c.timeframeMin, limit: c.candles, currency: c.currency, delayMs: c.requestDelayMs });
-    if (!requireLatest || ks.at(-1)?.t >= expected) break;
+  const b = candleBook();
+  if (!dlmmPool) return { candles: [], snap: null, chartPool: null, stale: true, why: "no pool" };
+  if (b.needsSeed(dlmmPool)) {
+    requestSeed(dlmmPool, mint);
+    return { candles: [], snap: null, chartPool: dlmmPool, stale: true, why: "history not seeded yet" };
   }
-  const stale = requireLatest && !(ks.at(-1)?.t >= expected);
-  return { candles: ks, snap: stale ? null : snapshot(ks, c), chartPool: pool, stale };
+  const ks = b.closed(dlmmPool);
+  const stale = requireLatest && !(ks.at(-1)?.t >= lastClosedCandleStart());
+  return { candles: ks, snap: stale ? null : snapshot(ks, c), chartPool: dlmmPool, stale, why: stale ? "latest candle missing" : null };
 }
 
 // ─── Entry ──────────────────────────────────────────────────────────────────
@@ -248,10 +322,8 @@ async function tryEntries() {
       // Entries must happen close to the candle close; a slow cycle skips rather than chases.
       const lateMin = (Date.now() - (lastClosedCandleStart() + ep().chart.timeframeMin * 60_000)) / 60_000;
       if (lateMin > ep().entry.maxEntryDelayMin) { log("ep_entry", `entry window passed (${lateMin.toFixed(1)}m after close) — remaining candidates wait for the next candle`); break; }
-      let snap, ks, stale;
-      try { ({ snap, candles: ks, stale } = await candleSnapshot(w.mint, w.poolAddress, { requireLatest: true })); }
-      catch (err) { log("ep_entry", `${w.mint.slice(0, 8)} candles unavailable: ${err.message}`); continue; }
-      if (stale) { log("ep_entry", `${w.mint.slice(0, 8)} latest 15m candle not published yet — skipped`); continue; }
+      const { snap, candles: ks, stale, why } = await candleSnapshot(w.mint, w.poolAddress, { requireLatest: true });
+      if (stale) { log("ep_entry", `${w.mint.slice(0, 8)} candles not ready (${why}) — skipped this candle`); continue; }
       const sig = entrySignal(series(ks, ep().chart), ks.length - 1, ep().entry);
       if (!snap || !sig.enter) continue;
       log("ep_entry", `${w.mint.slice(0, 8)} entry signal (${ep().entry.mode}): ${sig.reason}`);
@@ -398,15 +470,15 @@ async function resolveLowYield(p, rec, reason) {
   const mint = rec.mint ?? p.base_mint;
   if (e.exits.narrativeProxy && mint) {
     try {
-      const pool = await chartPool(mint, p.pool);
-      const ks = await src.candles(pool, { mint, unit: "hour", aggregate: 1, limit: 48, currency: e.chart.currency, delayMs: e.chart.requestDelayMs });
-      const st = supertrend(ks, e.chart.stPeriod, e.chart.stMultiplier);
-      const vols = ks.map(k => k.v);
-      const recentVolume = vols.slice(-6).reduce((a, b) => a + b, 0);
-      const priorVolume = vols.slice(-12, -6).reduce((a, b) => a + b, 0);
+      // 1h trend from our own candles (4 × 15m); volume from Meteora: last hour vs the 24h hourly average.
+      const hourly = candleBook().aggregate(p.pool, 60 / e.chart.timeframeMin);
+      const st = supertrend(hourly, e.chart.stPeriod, e.chart.stMultiplier);
+      const [h1, d1] = await Promise.all([src.discoveryPool(p.pool, "1h"), src.discoveryPool(p.pool, "24h")]);
+      const recentVolume = Number(h1.volume) || 0;
+      const priorVolume = (Number(d1.volume) || 0) / 24;
       const m = { recentVolume, priorVolume, stDirection1h: st[st.length - 1]?.direction ?? null };
       healthy = narrativeProxyHealthy(m, e.exits);
-      why = `vol ratio ${(priorVolume > 0 ? recentVolume / priorVolume : 0).toFixed(2)}, 1h trend ${m.stDirection1h}`;
+      why = `1h volume ${(priorVolume > 0 ? recentVolume / priorVolume : 0).toFixed(2)}× the 24h average, 1h trend ${m.stDirection1h ?? "unknown"}`;
     } catch (err) { why = `proxy data unavailable (${err.message})`; }
   }
   if (!healthy) {
@@ -494,6 +566,7 @@ async function paperTick() {
     for (const pp of paper.openPaperPositions()) {
       try {
         const pool = await src.discoveryPool(pp.pool, "5m");
+        candleBook().sample(pp.pool, Number(pool.pool_price), Date.now(), Number(pool.volume));
         const view = paper.markPaper(pp.id, pool, { nearSpanBins: ep().paper.nearSpanBins });
         if (!view) continue;
         paperViews.set(pp.id, view);
@@ -562,6 +635,8 @@ export function startEngine({ monitorStore, notifyFn }) {
     timers.discord = setInterval(() => void runDiscord(), Math.max(15, e.discord.pollSec) * 1000);
   }
   scheduleCandles();
+  void sampleTick();
+  timers.sampler = setInterval(() => void sampleTick(), Math.max(20, e.chart.sampleSec) * 1000);
   if (e.sources.smartWallet && e.walletFinder.auto.enabled) {
     // Daily smart-wallet scan: adds good LPers, removes ones that turned bad or went idle.
     // The monitor re-reads smart-wallets.json on its own, so no restart is needed.

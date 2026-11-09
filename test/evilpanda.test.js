@@ -479,3 +479,42 @@ test("LP Agent top-lpers parsing accepts common owner field names and skips junk
   assert.deepEqual(lpAgentOwners({ data: { data: [{ address: w1 }] } }).map(o => o.wallet), [w1]);
   assert.deepEqual(lpAgentOwners(null), []);
 });
+
+// ─── Candle book ─────────────────────────────────────────────────────────────
+import { CandleBook } from "../evilpanda/candlebook.js";
+
+test("candle book: seed, then build 15m candles from minute samples", () => {
+  const P = 900_000;
+  const t0 = 1_000 * P; // aligned
+  const b = new CandleBook({ periodMs: P, maxCandles: 300 });
+  assert.equal(b.needsSeed("pool", t0), true);
+  const seed = Array.from({ length: 50 }, (_, i) => ({ t: t0 - (50 - i) * P, o: 1, h: 1.1, l: 0.9, c: 1, v: 5 }));
+  b.seed("pool", seed, t0);
+  assert.equal(b.needsSeed("pool", t0), false);
+  assert.equal(b.closed("pool", t0).length, 50);
+  // samples inside the next candle
+  for (const [m, price] of [[1, 1.0], [5, 1.3], [9, 0.8], [14, 1.1]]) b.sample("pool", price, t0 + m * 60_000, 300);
+  assert.equal(b.closed("pool", t0 + 14 * 60_000).length, 50, "building candle is not closed yet");
+  const ks = b.closed("pool", t0 + P + 20_000); // just after the boundary
+  assert.equal(ks.length, 51);
+  assert.deepEqual({ t: ks.at(-1).t, o: ks.at(-1).o, h: ks.at(-1).h, l: ks.at(-1).l, c: ks.at(-1).c }, { t: t0, o: 1.0, h: 1.3, l: 0.8, c: 1.1 });
+  assert.equal(ks.at(-1).v, 900, "5m volume average × 3");
+  assert.equal(b.lastClosedStart(t0 + P + 20_000), t0);
+});
+
+test("candle book: a long gap asks for a reseed, history never goes backwards, JSON round-trips", () => {
+  const P = 900_000;
+  const t0 = 2_000 * P;
+  const b = new CandleBook({ periodMs: P });
+  b.seed("x", [{ t: t0 - P, o: 1, h: 1, l: 1, c: 1 }], t0);
+  assert.equal(b.needsSeed("x", t0 + 2 * P), false);
+  assert.equal(b.needsSeed("x", t0 + 5 * P), true, "bot was down for > 2 candles");
+  b.sample("x", 2, t0 + 60_000);
+  const copy = CandleBook.fromJSON(JSON.parse(JSON.stringify(b)), { periodMs: P });
+  assert.equal(copy.closed("x", t0 + P + 1).length, 2);
+  assert.equal(CandleBook.fromJSON({ periodMs: 60_000, pools: { x: {} } }, { periodMs: P }).pools.size, 0, "different timeframe → start fresh");
+  const h = new CandleBook({ periodMs: P });
+  h.seed("y", Array.from({ length: 8 }, (_, i) => ({ t: t0 + i * P, o: i, h: i + 1, l: i - 1, c: i + 0.5, v: 1 })), t0 + 9 * P);
+  const hourly = h.aggregate("y", 4, t0 + 9 * P);
+  assert.equal(hourly.length, Math.ceil(8 / 4) + ((t0 / P) % 4 ? 1 : 0));
+});

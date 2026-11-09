@@ -58,3 +58,4 @@ backtest/cache/
 backtest/results/
 wallet-finder/results/
 wallet-finder/state.json
+evilpanda-candles.json
