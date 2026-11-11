@@ -359,10 +359,18 @@ async function attemptEntry(w, snap, depth) {
     return false;
   }
 
-  const balances = await getWalletBalances({ force: true, nativeOnly: true });
-  if (balances.error || !Number.isFinite(balances.sol)) { log("ep_entry", "balance read unavailable"); return false; }
-  if (balances.sol < config.management.minSolToOpen + config.management.gasReserve) { log("ep_entry", `insufficient SOL (${balances.sol})`); return false; }
-  const amountY = computeDeployAmount(balances.sol);
+  // Paper trading sizes from a virtual balance (start + realised paper PnL − SOL in
+  // open paper positions), so shadow mode works with an empty wallet.
+  let freeSol;
+  if (paperOn()) {
+    freeSol = paper.virtualFreeSol(e.paper.virtualBalanceSol);
+  } else {
+    const balances = await getWalletBalances({ force: true, nativeOnly: true });
+    if (balances.error || !Number.isFinite(balances.sol)) { log("ep_entry", "balance read unavailable"); return false; }
+    freeSol = balances.sol;
+  }
+  if (freeSol < config.management.minSolToOpen + config.management.gasReserve) { log("ep_entry", `insufficient ${paperOn() ? "virtual paper " : ""}SOL (${freeSol.toFixed(4)})`); return false; }
+  const amountY = computeDeployAmount(freeSol);
   const shape = chooseShape(w.shapeInput ?? {}, e.shape);
   // Fresh DLMM price at decision time; the submit guard compares against this.
   let basePrice;

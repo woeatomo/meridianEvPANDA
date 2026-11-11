@@ -148,7 +148,7 @@
       "narrativeProxy": true,
       "minVolumeRatio": 0.5
     },
-    "paper": { "enabled": true, "pollSec": 60, "nearSpanBins": 3 },
+    "paper": { "enabled": true, "pollSec": 60, "nearSpanBins": 3, "virtualBalanceSol": 1.5 },
     "walletFinder": {
       "pools": 15,
       "minClosed": 30,

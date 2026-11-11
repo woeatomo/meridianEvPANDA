@@ -329,6 +329,7 @@ export function buildEvilPandaConfig(e = {}) {
     enabled: true,              // only active in shadow mode: every "would deploy" becomes a simulated position
     pollSec: 60,
     nearSpanBins: 3,            // our liquidity within ±N bins of the price counts for the fee estimate
+    virtualBalanceSol: 1.5,     // paper trading starts with this much virtual SOL (≈ the capital you plan to use)
   });
   const llm = pick(e.llm, {
     enabled: false,

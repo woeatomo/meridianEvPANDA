@@ -518,3 +518,17 @@ test("candle book: a long gap asks for a reseed, history never goes backwards, J
   const hourly = h.aggregate("y", 4, t0 + 9 * P);
   assert.equal(hourly.length, Math.ceil(8 / 4) + ((t0 / P) % 4 ? 1 : 0));
 });
+
+test("paper virtual balance: start + realised PnL − capital in open paper positions", async () => {
+  const fs = await import("node:fs");
+  const { repoPath } = await import("../repo-root.js");
+  const file = repoPath("evilpanda-paper.json");
+  const backup = fs.existsSync(file) ? fs.readFileSync(file) : null;
+  fs.writeFileSync(file, JSON.stringify({ open: { a: { capitalSol: 0.4 } }, closed: [{ pnlSol: 0.05 }, { pnlSol: -0.02 }] }));
+  try {
+    const paper = await import(`../evilpanda/paper.js?t=${Date.now()}`);
+    assert.ok(Math.abs(paper.virtualFreeSol(1.5) - (1.5 + 0.03 - 0.4)) < 1e-9);
+  } finally {
+    if (backup) fs.writeFileSync(file, backup); else fs.unlinkSync(file);
+  }
+});

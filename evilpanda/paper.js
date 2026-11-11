@@ -78,6 +78,13 @@ export function markPaper(id, pool, { nearSpanBins = 3, now = Date.now() } = {})
   });
 }
 
+/** Virtual free SOL for paper sizing: start + realised paper PnL − capital in open paper positions. */
+export function virtualFreeSol(startSol) {
+  const realised = book.closed.reduce((a, t) => a + (t.pnlSol || 0), 0);
+  const locked = Object.values(book.open).reduce((a, p) => a + (p.capitalSol || 0), 0);
+  return startSol + realised - locked;
+}
+
 export function paperPeak(id) {
   return book.open[id]?.peak ?? null;
 }
