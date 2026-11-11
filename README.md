@@ -42,7 +42,7 @@ Finds wallets with open positions in the busiest memecoin DLMM pools (read on-ch
 
 ### Paper trading (shadow mode)
 
-With `shadowMode: true` and `evilPanda.paper.enabled` (default), every "would deploy" opens a simulated position priced from live Meteora data every minute and closed by the same exit rules. `node cli.js paper` shows results; Telegram gets 📝 alerts. Nothing touches the wallet.
+With `shadowMode: true` and `evilPanda.paper.enabled` (default), every "would deploy" opens a simulated position priced from live Meteora data every minute and closed by the same exit rules. `node cli.js paper` shows results — judge by `totalPnlSol` and `feeKeptPct` (net PnL ÷ fees earned; negative means price moves ate more than all fees), not win rate; `byShape` compares bid-ask vs spot and `reentry`/`firstEntry` split repeat entries into the same pool. Telegram gets 📝 alerts. Nothing touches the wallet.
 
 Set `evilPanda.enabled: false` to get the original wallet-convergence behaviour back.
 

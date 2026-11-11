@@ -572,3 +572,26 @@ test("token age minimum defaults to 12h; newest-first is no longer the screener 
   assert.match(rejectTokenBasics(young, MINT, { ...c.screener, ...c.filters }, now), /too young/);
   assert.equal(rejectTokenBasics(goodToken, MINT, { ...c.screener, ...c.filters }, now), null); // 48h old
 });
+
+// ─── Paper summary: judge net results, not win rate (HALO findings) ───
+import { summarizeTrades } from "../evilpanda/paper.js";
+
+test("paper summary: fee kept %, median hold, shape and re-entry split", () => {
+  const s = summarizeTrades([
+    { rule: "TRAILING_TP", shape: "bid_ask", pnlSol: 0.02, pnlPct: 5, feesSol: 0.05, heldMin: 15 },
+    { rule: "STOP_LOSS", shape: "bid_ask", pnlSol: -0.06, pnlPct: -15, feesSol: 0.01, heldMin: 40, reentry: true },
+    { rule: "OOR_ABOVE", shape: "spot", pnlSol: 0.04, pnlPct: 10, feesSol: 0.04, heldMin: 90, reentry: true },
+  ]);
+  assert.equal(s.closed, 3);
+  assert.equal(s.winRatePct, 67);
+  assert.equal(s.totalPnlSol, 0);
+  assert.equal(s.feesSol, 0.1);
+  assert.equal(s.feeKeptPct, 0);
+  assert.equal(s.medianHeldMin, 40);
+  assert.equal(s.byShape.bid_ask.feeKeptPct, -67);
+  assert.equal(s.byShape.spot.feeKeptPct, 100);
+  assert.equal(s.reentry.n, 2);
+  assert.equal(s.firstEntry.n, 1);
+  assert.equal(s.byRule.STOP_LOSS.n, 1);
+  assert.equal(summarizeTrades([]).feeKeptPct, null);
+});
