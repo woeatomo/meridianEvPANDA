@@ -139,3 +139,21 @@ export function chooseShape({ token, pool, rugcheck, gmgn }, shape, now = Date.n
   }
   return { strategy: "spot", reason: "token stable: age, mcap, volatility, rugcheck and gmgn all within spot criteria" };
 }
+
+/**
+ * Stand-in for the GMGN filter while no GMGN key is set: Jupiter's bot-holder
+ * share (rough proxy for bundling) and Rugcheck insider warnings. Weaker than
+ * GMGN, better than nothing. Returns a reason or null.
+ */
+export function rejectGmgnFallback(token, rugcheck, fb) {
+  if (!fb?.enabled) return null;
+  const bots = num(token?.audit?.botHoldersPercentage);
+  if (bots == null) { if (fb.requireBotData) return "bot holders % unknown (GMGN fallback)"; }
+  else if (bots >= fb.maxBotHoldersPct) return `bot holders ${bots.toFixed(1)}% >= ${fb.maxBotHoldersPct}% (GMGN fallback)`;
+  if (fb.blockRugcheckInsiders) {
+    const re = new RegExp(fb.insiderPattern || "insider", "i");
+    const hit = (Array.isArray(rugcheck?.risks) ? rugcheck.risks : []).find(r => re.test(`${r?.name ?? ""} ${r?.description ?? ""}`));
+    if (hit) return `rugcheck: ${hit.name} (GMGN fallback)`;
+  }
+  return null;
+}

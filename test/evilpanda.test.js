@@ -532,3 +532,15 @@ test("paper virtual balance: start + realised PnL − capital in open paper posi
     if (backup) fs.writeFileSync(file, backup); else fs.unlinkSync(file);
   }
 });
+
+import { rejectGmgnFallback } from "../evilpanda/filters.js";
+test("GMGN fallback: Jupiter bot holders and Rugcheck insider warnings", () => {
+  const fb = buildEvilPandaConfig({}).gmgn.fallback;
+  const tok = b => ({ audit: { botHoldersPercentage: b } });
+  assert.equal(rejectGmgnFallback(tok(12), { risks: [] }, fb), null);
+  assert.match(rejectGmgnFallback(tok(31), { risks: [] }, fb), /bot holders/);
+  assert.match(rejectGmgnFallback(tok(undefined), { risks: [] }, fb), /unknown/);
+  assert.equal(rejectGmgnFallback(tok(undefined), null, { ...fb, requireBotData: false }), null);
+  assert.match(rejectGmgnFallback(tok(5), { risks: [{ name: "Insider networks detected", level: "warn" }] }, fb), /Insider/);
+  assert.equal(rejectGmgnFallback(tok(99), null, { ...fb, enabled: false }), null);
+});

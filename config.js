@@ -218,6 +218,14 @@ export function buildEvilPandaConfig(e = {}) {
     requireData: false,         // false: skip the GMGN filter when no key / data
   });
   gmgn.apiKey = nonEmptyString(process.env.GMGN_API_KEY, typeof e.gmgn?.apiKey === "string" ? e.gmgn.apiKey : "");
+  // Used only while there is no GMGN key.
+  gmgn.fallback = pick(e.gmgn?.fallback, {
+    enabled: true,
+    maxBotHoldersPct: 30,       // Jupiter audit.botHoldersPercentage (rough bundling proxy; upstream Meridian used 30)
+    requireBotData: true,       // unknown bot-holder share → reject (missing data is never "safe")
+    blockRugcheckInsiders: true,
+    insiderPattern: "insider",  // regex on Rugcheck risk name/description
+  });
   const discord = pick(e.discord, {
     pollSec: 60,
     url: "https://api.agentmeridian.xyz/api",

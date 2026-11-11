@@ -25,7 +25,7 @@ import { checkMintOnChain } from "../standalone/screening.js";
 import * as src from "./sources.js";
 import { snapshot, series, supertrend } from "./indicators.js";
 import { entrySignal } from "./entry.js";
-import { rejectTokenBasics, rejectRugcheck, rejectGmgnFetch, rejectPool, rankPools, chooseShape } from "./filters.js";
+import { rejectTokenBasics, rejectRugcheck, rejectGmgnFetch, rejectGmgnFallback, rejectPool, rankPools, chooseShape } from "./filters.js";
 import { fastExitDecision, candleExitDecision, updateOor, narrativeProxyHealthy } from "./exits.js";
 import { entryVeto, lowYieldVeto } from "./llm.js";
 import { binsForDownsidePct } from "./range.js";
@@ -111,6 +111,11 @@ export async function screenCandidate(mint) {
     const r = rejectGmgnFetch(await src.gmgnSecurity(mint, e.gmgn), e.gmgn);
     gmgn = r.metrics;
     if (r.reason) return { pass: false, reason: r.reason };
+  }
+  // No GMGN key → apply the Jupiter/Rugcheck stand-in instead of nothing.
+  if (!e.gmgn.enabled || !e.gmgn.apiKey) {
+    const why = rejectGmgnFallback(token, rugcheck, e.gmgn.fallback);
+    if (why) return { pass: false, reason: why };
   }
 
   const addresses = (await src.poolsForMint(mint, config.tokens.SOL)).slice(0, 5);
@@ -666,7 +671,7 @@ export function startEngine({ monitorStore, notifyFn }) {
   };
   void rescreen();
   timers.rescreen = setInterval(() => void rescreen(), 2 * 60_000);
-  log("ep", `EvilPanda engine started — sources: ${Object.entries(e.sources).filter(([, v]) => v).map(([k]) => k).join(", ")} | range ${e.range.mode === "adaptive" ? `adaptive -${e.range.adaptive.minDepthPct}…-${e.range.adaptive.maxDepthPct}% (ATR ${e.range.adaptive.atrLowPct}–${e.range.adaptive.atrHighPct}%)` : `-${e.range.targetDownsidePct}%`} (min -${e.range.minDownsidePct}%, rent-free=${e.range.shrinkToInitialized}) | pools ${e.pool.ranking} | shape ${e.shape.default}${e.shape.autoSpot ? "/auto-spot" : ""} | paper ${paperOn() ? "on" : "off"} | LLM ${e.llm.enabled ? e.llm.model : "off"} | GMGN ${e.gmgn.apiKey ? "on" : "no key → skipped"}`);
+  log("ep", `EvilPanda engine started — sources: ${Object.entries(e.sources).filter(([, v]) => v).map(([k]) => k).join(", ")} | range ${e.range.mode === "adaptive" ? `adaptive -${e.range.adaptive.minDepthPct}…-${e.range.adaptive.maxDepthPct}% (ATR ${e.range.adaptive.atrLowPct}–${e.range.adaptive.atrHighPct}%)` : `-${e.range.targetDownsidePct}%`} (min -${e.range.minDownsidePct}%, rent-free=${e.range.shrinkToInitialized}) | pools ${e.pool.ranking} | shape ${e.shape.default}${e.shape.autoSpot ? "/auto-spot" : ""} | paper ${paperOn() ? "on" : "off"} | LLM ${e.llm.enabled ? e.llm.model : "off"} | GMGN ${e.gmgn.apiKey ? "on" : e.gmgn.fallback.enabled ? `no key → fallback (bot holders < ${e.gmgn.fallback.maxBotHoldersPct}%, rugcheck insiders)` : "no key → skipped"}`);
 }
 
 export function stopEngine() {

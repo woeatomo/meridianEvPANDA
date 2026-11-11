@@ -81,7 +81,8 @@
       "maxTop10Pct": 30,
       "ratesAreFractions": true,
       "requireData": false,
-      "requestDelayMs": 2500
+      "requestDelayMs": 2500,
+      "fallback": { "enabled": true, "maxBotHoldersPct": 30, "requireBotData": true, "blockRugcheckInsiders": true, "insiderPattern": "insider" }
     },
     "discord": { "pollSec": 60 },
 
