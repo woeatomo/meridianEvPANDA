@@ -193,8 +193,9 @@ export function buildEvilPandaConfig(e = {}) {
     pageSize: 50,
     requireProfile: true,       // must have an image
     requireSocials: false,
-    minTokenAgeHours: null,
-    maxTokenAgeHours: null,
+    sortBy: "fee_active_tvl",   // fee_active_tvl (default) | volume | newest (original EvilPanda order)
+    minTokenAgeHours: 12,       // skip the first-hours rug/sniper phase; indicators need ~9h of 15m candles anyway
+    maxTokenAgeHours: null,     // no maximum: older tokens that are still busy pass
   });
   const filters = pick(e.filters, { minTokenFeesSol: 30, maxTop10Pct: 30 });
   const rugcheck = pick(e.rugcheck, {
@@ -252,6 +253,8 @@ export function buildEvilPandaConfig(e = {}) {
     signalWindowCandles: 16,    // pullback/after_pump must happen within N candles (4h) of the Supertrend break
     pullbackRetracePct: 10,     // pullback: close this far below the high since the break, still above Supertrend
     afterPumpPct: 30,           // after_pump: close this far above the break close
+    nearStPct: 3,               // break_or_near: close at most this far above the Supertrend line
+    nearWindowCandles: 48,      // break_or_near: support retests count for 12h after the break
     freshBreakCandles: 1,       // (legacy, unused) kept so old configs still load
     maxPriceMovePct: 5,         // abort if price moved more than this between signal and submit
     maxEntryDelayMin: 5,        // skip entries if the cycle runs later than this after the candle close

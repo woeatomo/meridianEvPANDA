@@ -198,9 +198,12 @@ const VARIANTS = {
   "entry-pullback-20%": { ...base, entry: { ...base.entry, mode: "pullback", pullbackRetracePct: 20 } },
   "entry-setelah-pump-30%": { ...base, entry: { ...base.entry, mode: "after_pump", afterPumpPct: 30 } },
   "entry-setelah-pump-60%": { ...base, entry: { ...base.entry, mode: "after_pump", afterPumpPct: 60 } },
+  "entry-break-atau-dekat-ST-3%": { ...base, entry: { ...base.entry, mode: "break_or_near", nearStPct: 3 } },
+  "entry-break-atau-dekat-ST-6%": { ...base, entry: { ...base.entry, mode: "break_or_near", nearStPct: 6 } },
   "tanpa-low-yield": { ...base, exits: { ...base.exits, lowYieldMinFeePerTvl24h: null } },
 };
 VARIANTS["murni-pullback-10%"] = { ...VARIANTS["murni-evilpanda"], entry: { ...base.entry, mode: "pullback", pullbackRetracePct: 10 } };
+VARIANTS["murni-break-atau-dekat-ST-3%"] = { ...VARIANTS["murni-evilpanda"], entry: { ...base.entry, mode: "break_or_near", nearStPct: 3 } };
 VARIANTS["murni-setelah-pump-30%"] = { ...VARIANTS["murni-evilpanda"], entry: { ...base.entry, mode: "after_pump", afterPumpPct: 30 } };
 const FEE_SCENARIOS = { rendah: 0.5, sedang: 1, tinggi: 2 };
 

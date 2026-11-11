@@ -119,10 +119,15 @@ export async function scanDiscovery(sc, solMint) {
     if (p.token_y?.address !== solMint || !p.token_x?.address) continue;
     const prev = byMint.get(p.token_x.address);
     const createdAt = Number(p.token_x?.created_at ?? p.base_token_created_at ?? 0);
-    if (!prev) byMint.set(p.token_x.address, { mint: p.token_x.address, createdAt, name: p.name });
+    const feeTvl = Number(p.fee_active_tvl_ratio) || 0;
+    const volume = Number(p.volume) || 0;
+    // One row per token, keeping its best pool's numbers.
+    if (!prev || feeTvl > prev.feeTvl) byMint.set(p.token_x.address, { mint: p.token_x.address, createdAt, name: p.name, feeTvl, volume });
   }
-  // EvilPanda sorts by age: newest tokens first.
-  return [...byMint.values()].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const rows = [...byMint.values()];
+  if (sc.sortBy === "newest") return rows.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)); // original EvilPanda order
+  if (sc.sortBy === "volume") return rows.sort((a, b) => b.volume - a.volume);
+  return rows.sort((a, b) => b.feeTvl - a.feeTvl); // default: best fee per active-TVL dollar first
 }
 
 /** Discord LP-call candidates relayed by the Agent Meridian API (read-only, no account needed). */

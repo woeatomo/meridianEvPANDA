@@ -544,3 +544,31 @@ test("GMGN fallback: Jupiter bot holders and Rugcheck insider warnings", () => {
   assert.match(rejectGmgnFallback(tok(5), { risks: [{ name: "Insider networks detected", level: "warn" }] }, fb), /Insider/);
   assert.equal(rejectGmgnFallback(tok(99), null, { ...fb, enabled: false }), null);
 });
+
+test("entry break_or_near: fires on the break, then on a support retest only after price moved away", () => {
+  const e = { mode: "break_or_near", nearStPct: 3, nearWindowCandles: 48 };
+  // run up well above the line, then drift back down to it
+  const away = entryCandles([1.06, 1.06, 1.04, 1.0, 0.97, 0.97, 0.97, 0.97, 0.98, 0.98, 0.98, 0.98, 0.98]);
+  const s = indSeries(away);
+  const flip = away.findIndex((_, i) => i > 0 && s.st[i] && s.st[i - 1] && s.st[i].direction === "up" && s.st[i - 1].direction === "down");
+  const hits = fired(away, e);
+  assert.equal(hits[0], flip, "first signal is the break itself");
+  for (const h of hits.slice(1)) {
+    assert.ok(away[h].c > s.st[h].value && (away[h].c - s.st[h].value) / s.st[h].value <= 0.03, "retest is just above the line");
+    assert.ok(away.slice(flip + 1, h).some((k, x) => (k.c - s.st[flip + 1 + x].value) / s.st[flip + 1 + x].value > 0.06), "price had moved away first");
+  }
+  assert.ok(hits.length <= 2);
+  // hugging the line right after the break never counts as a retest
+  const hug = entryCandles([1.0, 1.0, 1.0, 1.0, 1.0]);
+  assert.ok(fired(hug, e).length <= 1);
+});
+
+test("token age minimum defaults to 12h; newest-first is no longer the screener order", () => {
+  const c = buildEvilPandaConfig({});
+  assert.equal(c.screener.minTokenAgeHours, 12);
+  assert.equal(c.screener.sortBy, "fee_active_tvl");
+  const now = Date.parse("2026-11-07T00:00:00Z");
+  const young = { ...goodToken, createdAt: "2026-11-06T18:00:00Z" }; // 6h old
+  assert.match(rejectTokenBasics(young, MINT, { ...c.screener, ...c.filters }, now), /too young/);
+  assert.equal(rejectTokenBasics(goodToken, MINT, { ...c.screener, ...c.filters }, now), null); // 48h old
+});

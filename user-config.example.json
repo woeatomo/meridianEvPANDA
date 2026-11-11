@@ -61,7 +61,8 @@
       "category": "trending",
       "requireProfile": true,
       "requireSocials": false,
-      "minTokenAgeHours": null,
+      "sortBy": "fee_active_tvl",
+      "minTokenAgeHours": 12,
       "maxTokenAgeHours": null
     },
     "filters": { "minTokenFeesSol": 30, "maxTop10Pct": 30 },
@@ -104,6 +105,8 @@
       "signalWindowCandles": 16,
       "pullbackRetracePct": 10,
       "afterPumpPct": 30,
+      "nearStPct": 3,
+      "nearWindowCandles": 48,
       "maxPriceMovePct": 5,
       "maxEntryDelayMin": 5,
       "watchlistTtlHours": 6,
