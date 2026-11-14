@@ -63,7 +63,20 @@ export async function rugcheckSummary(mint, { delayMs = 1000 } = {}) {
  */
 export async function gmgnSecurity(mint, g) {
   if (!g.apiKey) return null;
-  const url = new URL(`${String(g.baseUrl).replace(/\/+$/, "")}/v1/token/security`);
+  const sec = await gmgnGet("/v1/token/security", mint, g);
+  if (!sec.ok) return sec;
+  // Phishing (rat traders) and bundler shares live in /v1/token/info → stat.*,
+  // not in /security. Merged under `info`; filters find them by name. A failed
+  // info call leaves those metrics unknown (→ stand-in check), never "safe".
+  if (g.withTokenInfo !== false) {
+    const info = await gmgnGet("/v1/token/info", mint, g);
+    if (info.ok) return { ok: true, data: { ...sec.data, info: info.data } };
+  }
+  return sec;
+}
+
+async function gmgnGet(path, mint, g) {
+  const url = new URL(`${String(g.baseUrl).replace(/\/+$/, "")}${path}`);
   url.searchParams.set("chain", "sol");
   url.searchParams.set("address", mint);
   url.searchParams.set("timestamp", String(Math.floor(Date.now() / 1000)));

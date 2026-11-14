@@ -46,7 +46,9 @@ export function rejectRugcheck(report, r) {
 export function gmgnPct(value, ratesAreFractions = true) {
   const n = num(value);
   if (n == null) return null;
-  return ratesAreFractions ? n * 100 : n;
+  // A share above 1 can't be a fraction: GMGN already sent a percent (some
+  // "…_percentage" fields do), so don't scale it again.
+  return ratesAreFractions && n <= 1 ? n * 100 : n;
 }
 
 /** First value found for any of `keys`, searching nested objects (GMGN nests some payloads). */
