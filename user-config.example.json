@@ -83,6 +83,7 @@
       "ratesAreFractions": true,
       "requireData": false,
       "requestDelayMs": 2500,
+      "onUnknown": "fallback",
       "fallback": { "enabled": true, "maxBotHoldersPct": 30, "requireBotData": true, "blockRugcheckInsiders": true, "insiderPattern": "insider" }
     },
     "discord": { "pollSec": 60 },

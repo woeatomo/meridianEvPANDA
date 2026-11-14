@@ -107,13 +107,15 @@ export async function screenCandidate(mint) {
   }
 
   let gmgn = null;
+  let gmgnGap = false;
   if (e.gmgn.enabled) {
     const r = rejectGmgnFetch(await src.gmgnSecurity(mint, e.gmgn), e.gmgn);
     gmgn = r.metrics;
+    gmgnGap = !!r.useFallback;
     if (r.reason) return { pass: false, reason: r.reason };
   }
-  // No GMGN key → apply the Jupiter/Rugcheck stand-in instead of nothing.
-  if (!e.gmgn.enabled || !e.gmgn.apiKey) {
+  // No GMGN key, or GMGN has no value for some metric → apply the Jupiter/Rugcheck stand-in.
+  if (!e.gmgn.enabled || !e.gmgn.apiKey || gmgnGap) {
     const why = rejectGmgnFallback(token, rugcheck, e.gmgn.fallback);
     if (why) return { pass: false, reason: why };
   }

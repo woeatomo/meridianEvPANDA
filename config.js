@@ -209,6 +209,7 @@ export function buildEvilPandaConfig(e = {}) {
   const gmgn = pick(e.gmgn, {
     enabled: true,
     baseUrl: "https://openapi.gmgn.ai",
+    onUnknown: "fallback",       // GMGN returns no value for a metric → check that token with the Jupiter/Rugcheck stand-in ("reject" = strict)
     requestDelayMs: 2500,
     maxRetries: 2,
     ratesAreFractions: true,    // API rates 0.12 = 12%; compare with the GMGN UI once and flip if needed

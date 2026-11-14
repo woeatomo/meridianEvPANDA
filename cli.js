@@ -16,6 +16,7 @@ Commands:
   manage                          Run one deterministic management pass
   ep-screen --mint ADDRESS        EvilPanda screen + 15m indicators for one mint (read-only)
   ep-watchlist                    Show EvilPanda candidates and why they pass/fail
+  gmgn --mint <mint>              Raw GMGN security data + filter verdict (debug)
   paper                           Paper-trading results (shadow mode simulated positions)
   close --position ADDRESS [--reason TEXT] [--skip-swap]
   claim --position ADDRESS
@@ -88,6 +89,16 @@ async function main() {
       return out({ pass: screened.pass, reason: screened.reason, pool: screened.pool?.pool_address ?? null, binStep: screened.pool?.dlmm_params?.bin_step ?? null, rugcheckScore: screened.rugcheck?.score_normalised ?? null, gmgn: screened.gmgn ?? null, chart });
     }
     case 'ep-watchlist': return out((await import('./evilpanda/engine.js')).watchlistSummary());
+    case 'gmgn': {
+      const mint = requireFlag('mint');
+      const g = config.evilpanda.gmgn;
+      if (!g.apiKey) return out({ error: "GMGN_API_KEY is not set in .env" });
+      const src = await import('./evilpanda/sources.js');
+      const { rejectGmgnFetch } = await import('./evilpanda/filters.js');
+      const res = await src.gmgnSecurity(mint, g);
+      const keys = (o, d = 0) => (o && typeof o === 'object' && d < 3) ? Object.fromEntries(Object.entries(o).map(([k, v]) => [k, v && typeof v === 'object' && !Array.isArray(v) ? keys(v, d + 1) : v])) : o;
+      return out({ ok: res?.ok, reason: res?.reason ?? null, raw: res?.ok ? keys(res.data) : null, verdict: rejectGmgnFetch(res, g) });
+    }
     case 'paper': return out((await import('./evilpanda/paper.js')).paperSummary());
     case 'close': case 'claim': case 'swap': {
       const { executeTool } = await import('./tools/executor.js');

@@ -49,27 +49,48 @@ export function gmgnPct(value, ratesAreFractions = true) {
   return ratesAreFractions ? n * 100 : n;
 }
 
+/** First value found for any of `keys`, searching nested objects (GMGN nests some payloads). */
+export function findField(obj, keys, depth = 0) {
+  if (!obj || typeof obj !== "object" || depth > 4) return null;
+  for (const k of keys) if (obj[k] != null && obj[k] !== "") return obj[k];
+  for (const v of Object.values(obj)) {
+    if (v && typeof v === "object" && !Array.isArray(v)) {
+      const hit = findField(v, keys, depth + 1);
+      if (hit != null) return hit;
+    }
+  }
+  return null;
+}
+
 /** Normalised GMGN metrics (percent) from `/v1/token/security` (+ optional token info). */
 export function gmgnMetrics(security, g) {
   if (!security || typeof security !== "object") return null;
   const f = g.ratesAreFractions !== false;
   return {
-    phishingPct: gmgnPct(security.rat_trader_amount_rate, f),
-    bundlerPct: gmgnPct(security.bundler_trader_amount_rate, f),
-    insidersPct: gmgnPct(security.suspected_insider_hold_rate, f),
-    top10Pct: gmgnPct(security.top_10_holder_rate, f),
+    phishingPct: gmgnPct(findField(security, ["rat_trader_amount_rate", "top_rat_trader_percentage"]), f),
+    bundlerPct: gmgnPct(findField(security, ["bundler_trader_amount_rate", "top_bundler_trader_percentage"]), f),
+    insidersPct: gmgnPct(findField(security, ["suspected_insider_hold_rate"]), f),
+    top10Pct: gmgnPct(findField(security, ["top_10_holder_rate"]), f),
   };
 }
 
 /**
  * GMGN gate on a gmgnSecurity() result. null = no API key (skipped unless
  * requireData); {ok:false} = the call failed → reject, an outage is never "safe".
- * With data, every configured metric must be present.
+ * With data, every configured metric must be present — unless onUnknown is
+ * "fallback": then a metric GMGN has no value for is checked by the
+ * Jupiter/Rugcheck stand-in instead (useFallback: true), and the metrics GMGN
+ * did return are still enforced.
  */
 export function rejectGmgnFetch(fetchResult, g) {
   if (fetchResult == null) return { reason: g.requireData ? "gmgn: no API key" : null, metrics: null };
   if (!fetchResult.ok) return { reason: `gmgn unavailable (${fetchResult.reason})`, metrics: null };
   const metrics = gmgnMetrics(fetchResult.data, g);
+  if (g.onUnknown === "fallback") {
+    const reason = rejectGmgn(metrics, { ...g, requireData: false });
+    const missing = metrics && [metrics.phishingPct, metrics.bundlerPct, metrics.insidersPct].some(v => v == null);
+    return { reason, metrics, useFallback: !reason && !!missing };
+  }
   return { reason: rejectGmgn(metrics, { ...g, requireData: true }), metrics };
 }
 

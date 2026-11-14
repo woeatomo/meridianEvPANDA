@@ -135,14 +135,15 @@ test("GMGN filter: phishing<30, bundling<60, insiders<10, top10<30; skipped with
   assert.match(rejectGmgn(null, { ...ep.gmgn, requireData: true }), /unavailable/);
 });
 
-test("GMGN fetch gate: no key skips, an outage or missing field with a key rejects", () => {
+test("GMGN fetch gate: no key skips, an outage rejects, a missing field falls back (or rejects when strict)", () => {
   assert.equal(rejectGmgnFetch(null, ep.gmgn).reason, null);
   assert.match(rejectGmgnFetch(null, { ...ep.gmgn, requireData: true }).reason, /no API key/);
   assert.match(rejectGmgnFetch({ ok: false, reason: "timeout" }, ep.gmgn).reason, /unavailable \(timeout\)/);
   const full = { rat_trader_amount_rate: 0.1, bundler_trader_amount_rate: 0.2, suspected_insider_hold_rate: 0.01, top_10_holder_rate: 0.2 };
   assert.equal(rejectGmgnFetch({ ok: true, data: full }, ep.gmgn).reason, null);
   const { rat_trader_amount_rate, ...missing } = full;
-  assert.match(rejectGmgnFetch({ ok: true, data: missing }, ep.gmgn).reason, /phishing unknown/);
+  assert.equal(rejectGmgnFetch({ ok: true, data: missing }, ep.gmgn).useFallback, true); // default: stand-in checks the gap
+  assert.match(rejectGmgnFetch({ ok: true, data: missing }, { ...ep.gmgn, onUnknown: "reject" }).reason, /phishing unknown/);
 });
 
 test("pools: exact token/SOL DLMM within bin-step range, highest bin step ranked first", () => {
@@ -594,4 +595,18 @@ test("paper summary: fee kept %, median hold, shape and re-entry split", () => {
   assert.equal(s.firstEntry.n, 1);
   assert.equal(s.byRule.STOP_LOSS.n, 1);
   assert.equal(summarizeTrades([]).feeKeptPct, null);
+});
+
+test("gmgn: nested fields are found and a missing metric falls back instead of rejecting", async () => {
+  const { gmgnMetrics, rejectGmgnFetch } = await import("../evilpanda/filters.js");
+  const g = { ratesAreFractions: true, maxPhishingPct: 30, maxBundlerPct: 60, maxInsidersPct: 10, maxTop10Pct: 30, onUnknown: "fallback" };
+  const nested = { security: { rat_trader_amount_rate: "0.1", bundler_trader_amount_rate: 0.2, suspected_insider_hold_rate: 0.05, top_10_holder_rate: 0.2 } };
+  assert.equal(gmgnMetrics(nested, g).phishingPct, 10);
+  assert.deepEqual(rejectGmgnFetch({ ok: true, data: nested }, g).useFallback, false);
+  const gap = { bundler_trader_amount_rate: 0.2, suspected_insider_hold_rate: 0.05, top_10_holder_rate: 0.2 };
+  const r = rejectGmgnFetch({ ok: true, data: gap }, g);
+  assert.equal(r.reason, null);
+  assert.equal(r.useFallback, true);
+  assert.match(rejectGmgnFetch({ ok: true, data: { ...gap, suspected_insider_hold_rate: 0.2 } }, g).reason, /insiders/);
+  assert.match(rejectGmgnFetch({ ok: true, data: gap }, { ...g, onUnknown: "reject" }).reason, /phishing unknown/);
 });
